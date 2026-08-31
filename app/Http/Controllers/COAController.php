@@ -39,6 +39,12 @@ class COAController extends Controller
             $query->where('shoa_id', $request->subhead);
         }
 
+        // Parties (customers/vendors) are just COA rows filtered by account_type —
+        // powers the "Customers" / "Vendors" quick links under Fleet Setup > Accounts.
+        if ($request->filled('account_type') && $request->account_type !== 'all') {
+            $query->where('account_type', $request->account_type);
+        }
+
         $chartOfAccounts = $query->latest()->get();
 
         return view('accounts.coa', compact('chartOfAccounts', 'subHeadOfAccounts'));
@@ -59,6 +65,7 @@ class COAController extends Controller
                 ],
                 // FIX: validate against canonical list so junk values can't be saved
                 'account_type' => ['nullable', 'string', Rule::in(self::ACCOUNT_TYPES)],
+                'trn'          => 'nullable|string|max:50', // NTN# / Tax Registration Number
                 'receivables'  => 'required|numeric',
                 'payables'     => 'required|numeric',
                 'credit_limit' => 'required|numeric',
@@ -90,6 +97,7 @@ class COAController extends Controller
                 'account_code' => $accountCode,
                 'name'         => $request->name,
                 'account_type' => $request->account_type,
+                'trn'          => $request->trn,
                 'receivables'  => $request->receivables,
                 'payables'     => $request->payables,
                 'credit_limit' => $request->credit_limit,
@@ -138,6 +146,7 @@ class COAController extends Controller
                     Rule::unique('chart_of_accounts')->ignore($id)->whereNull('deleted_at'),
                 ],
                 'account_type' => ['nullable', 'string', Rule::in(self::ACCOUNT_TYPES)],
+                'trn'          => 'nullable|string|max:50', // NTN# / Tax Registration Number
                 'receivables'  => 'required|numeric',
                 'payables'     => 'required|numeric',
                 'credit_limit' => 'required|numeric',
@@ -153,6 +162,7 @@ class COAController extends Controller
                 'shoa_id'      => $request->shoa_id,
                 'name'         => $request->name,
                 'account_type' => $request->account_type,
+                'trn'          => $request->trn,
                 'receivables'  => $request->receivables,
                 'payables'     => $request->payables,
                 'credit_limit' => $request->credit_limit,

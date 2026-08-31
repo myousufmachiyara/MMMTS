@@ -23,6 +23,16 @@ use App\Http\Controllers\{
     SaleReturnController,
     PermissionController,
     ProductSubcategoryController,
+    VehicleController,
+    OurCompanyController,
+    PortController,
+    CustomerLocationController,
+    VehicleRouteController,
+    DailyJobController,
+    BillController,
+    InvoiceController,
+    PaymentController,
+    FleetReportController,
 };
 
 Auth::routes();
@@ -34,7 +44,25 @@ Route::middleware(['auth'])->group(function () {
     Route::put('/users/{id}/change-password', [UserController::class, 'changePassword'])->name('users.changePassword');
     Route::put('/users/{id}/toggle-active', [UserController::class, 'toggleActive'])->name('users.toggleActive');
     Route::post('/change-my-password', [UserController::class, 'changeMyPassword'])->name('users.changeMyPassword');
-    
+
+    // Toggle-active endpoints for the new Fleet Setup master-data modules
+    // (not part of the generic CRUD loop below — mirrors users.toggleActive)
+    Route::put('/vehicles/{id}/toggle-active', [VehicleController::class, 'toggleActive'])->middleware('check.permission:vehicles.edit')->name('vehicles.toggleActive');
+    Route::put('/companies/{id}/toggle-active', [OurCompanyController::class, 'toggleActive'])->middleware('check.permission:companies.edit')->name('companies.toggleActive');
+    Route::put('/ports/{id}/toggle-active', [PortController::class, 'toggleActive'])->middleware('check.permission:ports.edit')->name('ports.toggleActive');
+    Route::put('/customer-locations/{id}/toggle-active', [CustomerLocationController::class, 'toggleActive'])->middleware('check.permission:customer_locations.edit')->name('customer-locations.toggleActive');
+    Route::put('/vehicle-routes/{id}/toggle-active', [VehicleRouteController::class, 'toggleActive'])->middleware('check.permission:vehicle_routes.edit')->name('vehicle-routes.toggleActive');
+
+    // AJAX picker endpoints — must be registered BEFORE the generic "$uri/{id}" loop below,
+    // otherwise "bills/get-jobs" / "invoices/get-bills" would be swallowed by the {id} route.
+    Route::get('/bills/get-jobs', [BillController::class, 'getJobs'])->middleware('check.permission:bills.index')->name('bills.getJobs');
+    Route::get('/invoices/get-bills', [InvoiceController::class, 'getBills'])->middleware('check.permission:invoices.index')->name('invoices.getBills');
+
+    // Delivery Challan — not a separate module, just a save + print action
+    // against a single Direct job (see DailyJobController).
+    Route::put('/daily-jobs/{id}/dc', [DailyJobController::class, 'saveDc'])->middleware('check.permission:daily_jobs.edit')->name('daily-jobs.saveDc');
+    Route::get('/daily-jobs/{id}/dc/print', [DailyJobController::class, 'printDc'])->middleware('check.permission:daily_jobs.print')->name('daily-jobs.printDc');
+
     // Common Modules
     $modules = [
         // User Management
@@ -47,6 +75,19 @@ Route::middleware(['auth'])->group(function () {
         'shoa' => ['controller' => SubHeadOfAccController::class, 'permission' => 'shoa'],
         // Vouchers
         'vouchers' => ['controller' => VoucherController::class, 'permission' => 'vouchers'],
+
+        // Fleet Setup / Masters
+        'vehicles' => ['controller' => VehicleController::class, 'permission' => 'vehicles'],
+        'companies' => ['controller' => OurCompanyController::class, 'permission' => 'companies'],
+        'ports' => ['controller' => PortController::class, 'permission' => 'ports'],
+        'customer-locations' => ['controller' => CustomerLocationController::class, 'permission' => 'customer_locations'],
+        'vehicle-routes' => ['controller' => VehicleRouteController::class, 'permission' => 'vehicle_routes'],
+
+        // Operations
+        'daily-jobs' => ['controller' => DailyJobController::class, 'permission' => 'daily_jobs'],
+        'bills' => ['controller' => BillController::class, 'permission' => 'bills'],
+        'invoices' => ['controller' => InvoiceController::class, 'permission' => 'invoices'],
+        'payments' => ['controller' => PaymentController::class, 'permission' => 'payments'],
     ];
 
     foreach ($modules as $uri => $config) {
@@ -89,5 +130,6 @@ Route::middleware(['auth'])->group(function () {
     // Reports (readonly)
     Route::prefix('reports')->name('reports.')->group(function () {
         Route::get('accounts', [AccountsReportController::class, 'accounts'])->name('accounts');
+        Route::get('fleet', [FleetReportController::class, 'index'])->middleware('check.permission:reports.fleet')->name('fleet');
     });
 });

@@ -15,6 +15,7 @@ class ChartOfAccounts extends Model
         'name',
         'account_code',
         'account_type',
+        'trn', // NTN# / Tax Registration Number for Parties (customers/vendors)
         'receivables',
         'payables',
         'credit_limit',
@@ -35,6 +36,25 @@ class ChartOfAccounts extends Model
     public function purchaseInvoices()
     {
         return $this->hasMany(PurchaseInvoice::class, 'vendor_id');
+    }
+
+    // Locations belonging to this account (only meaningful when account_type = 'customer')
+    public function locations()
+    {
+        return $this->hasMany(CustomerLocation::class, 'customer_id');
+    }
+
+    // ── Parties scopes ──────────────────────────────────────────────
+    // Parties (customers/vendors) are managed from Chart of Accounts and
+    // differentiated purely by account_type — no separate parties table.
+    public function scopeCustomers($query)
+    {
+        return $query->where('account_type', 'customer');
+    }
+
+    public function scopeVendors($query)
+    {
+        return $query->where('account_type', 'vendor');
     }
 
 }

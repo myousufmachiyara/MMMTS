@@ -5,7 +5,72 @@
 @section('content')
 	<div>
 		<h2 class="text-dark"><strong id="currentDate"></strong></h2>
-	</div>	
+	</div>
+
+	<div class="row">
+		<div class="col-12 col-md-4 col-lg-3 mb-2">
+			<section class="card card-featured-left card-featured-primary">
+				<div class="card-body icon-container data-container">
+					<h3 class="amount text-dark"><strong>Vehicles on Route Today</strong></h3>
+					<h2 class="amount m-0 text-primary"><strong>{{ $stats['vehicles_on_route_today'] }}</strong></h2>
+				</div>
+			</section>
+		</div>
+		<div class="col-12 col-md-4 col-lg-3 mb-2">
+			<section class="card card-featured-left card-featured-tertiary">
+				<div class="card-body icon-container data-container">
+					<h3 class="amount text-dark"><strong>Non-Billed Jobs</strong></h3>
+					<h2 class="amount m-0 text-tertiary"><strong>{{ $stats['non_billed_jobs'] }}</strong></h2>
+					<div class="summary-footer">
+						<a class="text-tertiary text-uppercase" href="{{ route('daily-jobs.index', ['billed' => 'non_billed']) }}">View Details</a>
+					</div>
+				</div>
+			</section>
+		</div>
+		<div class="col-12 col-md-4 col-lg-3 mb-2">
+			<section class="card card-featured-left card-featured-warning">
+				<div class="card-body icon-container data-container">
+					<h3 class="amount text-dark"><strong>Pending Bills</strong></h3>
+					<h2 class="amount m-0 text-warning"><strong>{{ $stats['pending_bills'] }}</strong></h2>
+					<div class="summary-footer">
+						<a class="text-warning text-uppercase" href="{{ route('bills.index', ['invoiced' => 'pending']) }}">View Details</a>
+					</div>
+				</div>
+			</section>
+		</div>
+		<div class="col-12 col-md-4 col-lg-3 mb-2">
+			<section class="card card-featured-left card-featured-info">
+				<div class="card-body icon-container data-container">
+					<h3 class="amount text-dark"><strong>Pending Invoices</strong></h3>
+					<h2 class="amount m-0 text-info"><strong>{{ $stats['pending_invoices'] }}</strong></h2>
+					<div class="summary-footer">
+						<a class="text-info text-uppercase" href="{{ route('invoices.index') }}">View Details</a>
+					</div>
+				</div>
+			</section>
+		</div>
+		<div class="col-12 col-md-4 col-lg-3 mb-2">
+			<section class="card card-featured-left card-featured-success">
+				<div class="card-body icon-container data-container">
+					<h3 class="amount text-dark"><strong>Total Receivables</strong></h3>
+					<h2 class="amount m-0 text-success">
+						<strong>{{ number_format($stats['total_receivables'], 2) }}</strong>
+					</h2>
+				</div>
+			</section>
+		</div>
+		<div class="col-12 col-md-4 col-lg-3 mb-2">
+			<section class="card card-featured-left card-featured-danger">
+				<div class="card-body icon-container data-container">
+					<h3 class="amount text-dark"><strong>Total Payables (Vendors)</strong></h3>
+					<h2 class="amount m-0 text-danger">
+						<strong>{{ number_format($stats['total_payables'], 2) }}</strong>
+					</h2>
+				</div>
+			</section>
+		</div>
+	</div>
+
 	{{-- <div class="row">
 		<div class="col-12 col-md-3 mb-2">	
 			<section class="card card-featured-left card-featured-success">

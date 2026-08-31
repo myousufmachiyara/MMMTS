@@ -53,6 +53,19 @@ class DatabaseSeeder extends Seeder
 
             // Vouchers
             'vouchers',
+
+            // Fleet Setup / Masters
+            'vehicles',
+            'companies',
+            'ports',
+            'customer_locations',
+            'vehicle_routes',
+
+            // Operations
+            'daily_jobs',
+            'bills',
+            'invoices',
+            'payments',
         ];
 
         $actions = ['index', 'create', 'edit', 'delete', 'print'];
@@ -66,7 +79,7 @@ class DatabaseSeeder extends Seeder
         }
 
         // 📊 Report permissions
-        $reports = ['accounts'];
+        $reports = ['accounts', 'fleet'];
 
         foreach ($reports as $report) {
             Permission::firstOrCreate([
@@ -75,6 +88,10 @@ class DatabaseSeeder extends Seeder
         }
 
         // Assign ALL permissions to both Superadmin and Admin
+        // FIX: $adminRole was referenced below without ever being defined —
+        // this line previously threw an undefined-variable fatal on every fresh seed.
+        $adminRole = Role::firstOrCreate(['name' => 'admin']);
+
         $superAdmin->syncPermissions(Permission::all());
         $adminRole->syncPermissions(Permission::all());
 
@@ -145,6 +162,8 @@ class DatabaseSeeder extends Seeder
             // (Vendors are created dynamically, but a control account is useful)
             ['id' =>  4, 'account_code' => '201001', 'shoa_id' =>  5, 'name' => 'Accounts Payable',     'account_type' => 'liability', 'receivables' => 0, 'payables' => 0],
             ['id' =>  5, 'account_code' => '202001', 'shoa_id' =>  6, 'name' => 'Loan Payable',         'account_type' => 'liability', 'receivables' => 0, 'payables' => 0],
+            // Tax collected on invoices — auto-posted here by InvoiceController when taxable
+            ['id' => 16, 'account_code' => '201002', 'shoa_id' =>  5, 'name' => 'Sales Tax Payable',    'account_type' => 'liability', 'receivables' => 0, 'payables' => 0],
 
             // ── EQUITY ──────────────────────────────────────────────
             ['id' =>  6, 'account_code' => '301001', 'shoa_id' =>  7, 'name' => 'Owner Capital',        'account_type' => 'equity',    'receivables' => 0, 'payables' => 0],
@@ -165,5 +184,20 @@ class DatabaseSeeder extends Seeder
             ['id' => 15, 'account_code' => '505001', 'shoa_id' => 14, 'name' => 'Miscellaneous Expense','account_type' => 'expenses',  'receivables' => 0, 'payables' => 0],
         ];
 
+        // FIX: $coaData was built above but never persisted — insert it now.
+        foreach ($coaData as $row) {
+            ChartOfAccounts::updateOrCreate(
+                ['id' => $row['id']],
+                array_merge($row, [
+                    'payables'     => $row['payables'] ?? 0,
+                    'credit_limit' => $row['credit_limit'] ?? 0,
+                    'opening_date' => $now->toDateString(),
+                    'created_by'   => $userId,
+                    'updated_by'   => $userId,
+                    'created_at'   => $now,
+                    'updated_at'   => $now,
+                ])
+            );
+        }
     }
 }

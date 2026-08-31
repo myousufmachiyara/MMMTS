@@ -77,6 +77,7 @@
                                     <th>Account Name</th>
                                     <th>Sub-head</th>
                                     <th>Type</th>
+                                    <th>NTN#</th>
                                     <th>Phone</th>
                                     <th>Date</th>
                                     <th>Remarks</th>
@@ -91,6 +92,7 @@
                                     <td><strong>{{ $item->name }}</strong></td>
                                     <td>{{ $item->subHeadOfAccount->name ?? '—' }}</td>
                                     <td><strong>{{ $accountTypes[$item->account_type] ?? ucfirst($item->account_type ?? '—') }}</strong></td>
+                                    <td>{{ $item->trn ?? '—' }}</td>
                                     <td>{{ $item->contact_no ?? '—' }}</td>
                                     <td>{{ \Carbon\Carbon::parse($item->opening_date)->format('d-m-Y') }}</td>
                                     <td>{{ $item->remarks ?? '—' }}</td>
@@ -161,6 +163,11 @@
                                             <option value="{{ $row->id }}">{{ $row->name }}</option>
                                         @endforeach
                                     </select>
+                                </div>
+
+                                <div class="col-lg-6 mb-2">
+                                    <label>NTN#</label>
+                                    <input type="text" class="form-control" placeholder="NTN#" name="trn">
                                 </div>
 
                                 <div class="col-lg-6 mb-2">
@@ -263,6 +270,12 @@
                                 </div>
 
                                 <div class="col-lg-6 mb-2">
+                                    <label>NTN#</label>
+                                    <input type="text" id="edit_trn" class="form-control"
+                                        placeholder="NTN#" name="trn">
+                                </div>
+
+                                <div class="col-lg-6 mb-2">
                                     <label>Receivables <span class="text-danger">*</span></label>
                                     <input type="number" id="edit_receivables" class="form-control"
                                         name="receivables" step="any" required>
@@ -332,6 +345,7 @@
                 // FIX: use specific IDs so selectors don't accidentally match
                 // the add-modal fields (both modals are in the DOM simultaneously)
                 $('#edit_name').val(data.name);
+                $('#edit_trn').val(data.trn);
                 $('#edit_receivables').val(data.receivables);
                 $('#edit_payables').val(data.payables);
                 $('#edit_credit_limit').val(data.credit_limit);
