@@ -87,3 +87,50 @@
         });
     });
 </script>
+
+<!-- ── Global UX helpers (apply site-wide, no per-page wiring needed) ── -->
+<script>
+// Every single-select .select2-js gets an "x" clear button so a wrong pick
+// can be undone without reopening the dropdown and picking something else
+// just to get back to nothing. (Multi-selects already let you remove tags
+// individually, so they're left as plain select2 with no placeholder/clear.)
+// Call this instead of $(...).select2(...) directly wherever a page inits
+// select2 — pass a container/selector to scope it (e.g. a freshly-added
+// table row), or nothing to scan the whole document.
+window.initSelect2 = function (scope) {
+    var $scope = scope ? $(scope) : $(document);
+    var $targets = $scope.filter('.select2-js').add($scope.find('.select2-js'));
+    $targets.each(function () {
+        var $el = $(this);
+        if ($el.hasClass('select2-hidden-accessible')) {
+            return; // already initialized — avoid double-init
+        }
+        if ($el.prop('multiple')) {
+            $el.select2({ width: '100%' });
+            return;
+        }
+        if ($el.find('option[value=""]').length === 0) {
+            $el.prepend('<option value=""></option>');
+        }
+        var placeholder = $el.data('placeholder')
+            || $el.find('option[value=""]').first().text().trim()
+            || 'Select...';
+        $el.select2({ width: '100%', allowClear: true, placeholder: placeholder });
+    });
+};
+
+// Clicking into a number field that's still at its default 0 clears it, so
+// the user can type straight in instead of backspacing the 0 first. Left
+// empty on blur is fine (every controller already treats '' as 0 on save);
+// we just put the 0 back visually so the field doesn't look abandoned.
+$(document).on('focus', 'input[type="number"]', function () {
+    if (this.value === '0') {
+        this.value = '';
+    }
+});
+$(document).on('blur', 'input[type="number"]', function () {
+    if (this.value.trim() === '') {
+        this.value = '0';
+    }
+});
+</script>

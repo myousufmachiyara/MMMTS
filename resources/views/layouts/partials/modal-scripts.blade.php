@@ -110,6 +110,6 @@ $(document).on('click', '.modal-dismiss, .mfp-close', function() {
 
 // ── Select2 init (harmless no-op if no .select2-js elements on this page) ──
 $(document).ready(function() {
-    $('.select2-js').select2({ width: '100%' });
+    initSelect2();
 });
 </script>

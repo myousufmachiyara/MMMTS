@@ -5,6 +5,8 @@ namespace App\Http\Controllers;
 use App\Models\ChartOfAccounts;
 use App\Models\CustomerLocation;
 use App\Models\DailyJob;
+use App\Models\DailyJobVehicle;
+use App\Models\DeliveryChallan;
 use App\Models\Port;
 use App\Models\Vehicle;
 use App\Models\VehicleRoute;
@@ -14,9 +16,23 @@ use Illuminate\Support\Facades\Log;
 
 class DailyJobController extends Controller
 {
+    // Item 11 — gates every RATE field (trip plan ports, rent/labour/yard/
+    // kanta, retention charges, extra port charges, DC linking) and the
+    // "mark complete" toggle. Someone without this can still create/edit a
+    // job's BASIC fields only (date, customer, and per-vehicle vehicle/
+    // route/container/description) — the job stays 'incomplete' until an
+    // admin fills the rest in.
+    private function canFillRates(): bool
+    {
+        return (bool) auth()->user()?->can('daily_jobs.fill_rates');
+    }
+
     public function index(Request $request)
     {
-        $query = DailyJob::with(['vehicle', 'customer', 'route', 'vendor', 'pickupPort', 'dropoffPort']);
+        // pickupPort/dropoffPort (header-level) are only used by the legacy
+        // DC modal below, for jobs created before the standalone Delivery
+        // Challan module existed.
+        $query = DailyJob::with(['vehicles.vehicle', 'vehicles.route', 'customer', 'vendor', 'pickupPort', 'dropoffPort']);
 
         $from = $request->filled('from_date') ? $request->from_date : now()->startOfMonth()->toDateString();
         $to   = $request->filled('to_date') ? $request->to_date : now()->toDateString();
@@ -30,6 +46,10 @@ class DailyJobController extends Controller
             $request->billed === 'billed' ? $query->whereNotNull('bill_id') : $query->whereNull('bill_id');
         }
 
+        if ($request->filled('status') && $request->status !== 'all') {
+            $query->where('status', $request->status);
+        }
+
         $jobs = $query->orderByDesc('date')->orderByDesc('id')->get();
 
         $customers = ChartOfAccounts::customers()->orderBy('name')->get();
@@ -40,12 +60,13 @@ class DailyJobController extends Controller
     private function formData()
     {
         return [
-            'vehicles'         => Vehicle::where('is_active', true)->orderBy('name')->get(),
-            'customers'        => ChartOfAccounts::customers()->orderBy('name')->get(),
-            'vendors'          => ChartOfAccounts::vendors()->orderBy('name')->get(),
-            'routes'           => VehicleRoute::where('is_active', true)->orderBy('name')->get(),
-            'ports'            => Port::where('is_active', true)->orderBy('name')->get(),
+            'vehicles'          => Vehicle::where('is_active', true)->orderBy('name')->get(),
+            'customers'         => ChartOfAccounts::customers()->orderBy('name')->get(),
+            'vendors'           => ChartOfAccounts::vendors()->orderBy('name')->get(),
+            'routes'            => VehicleRoute::where('is_active', true)->orderBy('name')->get(),
+            'ports'             => Port::where('is_active', true)->orderBy('name')->get(),
             'customerLocations' => CustomerLocation::where('is_active', true)->get(['id', 'customer_id', 'location_name']),
+            'canFillRates'      => $this->canFillRates(),
         ];
     }
 
@@ -72,37 +93,35 @@ class DailyJobController extends Controller
     private function rules(): array
     {
         return [
-            'date'                     => 'required|date',
-            'vehicle_id'               => 'required|exists:vehicles,id',
-            'customer_id'              => 'required|exists:chart_of_accounts,id',
-            'route_id'                 => 'required|exists:vehicle_routes,id',
-            'container_no'             => 'nullable|string|max:100',
-            'item_description'         => 'nullable|string|max:1000',
-            'rent'                     => 'nullable|numeric|min:0',
-            'labour_charges'           => 'nullable|numeric|min:0',
-            'yard_charges'             => 'nullable|numeric|min:0',
-            'kanta_charges'            => 'nullable|numeric|min:0',
+            'date'        => 'required|date',
+            'customer_id' => 'required|exists:chart_of_accounts,id',
+            'remarks'     => 'nullable|string|max:1000',
+            'mark_complete' => 'nullable|boolean',
 
-            'trip_type'                => 'required|in:one_way,two_way',
-            'pickup_port_id'           => 'required|exists:ports,id',
-            'pickup_charges'           => 'nullable|numeric|min:0',
-            'destination_location_id'  => 'nullable|required_if:trip_type,two_way|exists:customer_locations,id',
-            'destination_charges'      => 'nullable|numeric|min:0',
-            'dropoff_port_id'          => 'required|exists:ports,id',
-            'dropoff_charges'          => 'nullable|numeric|min:0',
+            'vehicles'                              => 'required|array|min:1',
+            'vehicles.*.id'                          => 'nullable|integer',
+            'vehicles.*.vehicle_id'                  => 'required|exists:vehicles,id',
+            'vehicles.*.route_id'                    => 'required|exists:vehicle_routes,id',
+            'vehicles.*.container_no'                => 'nullable|string|max:100',
+            'vehicles.*.item_description'            => 'nullable|string|max:1000',
 
-            'per_day_first_charges'    => 'nullable|numeric|min:0',
-            'per_day_next_rate'        => 'nullable|numeric|min:0',
-            'per_day_extra_days'       => 'nullable|integer|min:0',
+            'vehicles.*.trip_type'                   => 'nullable|in:one_way,two_way',
+            'vehicles.*.pickup_port_id'               => 'nullable|exists:ports,id',
+            'vehicles.*.destination_location_id'      => 'nullable|exists:customer_locations,id',
+            'vehicles.*.dropoff_port_id'               => 'nullable|exists:ports,id',
+            'vehicles.*.rent'                         => 'nullable|numeric|min:0',
+            'vehicles.*.labour_charges'                => 'nullable|numeric|min:0',
+            'vehicles.*.yard_charges'                  => 'nullable|numeric|min:0',
+            'vehicles.*.kanta_charges'                 => 'nullable|numeric|min:0',
+            'vehicles.*.retention_first_day_charges'   => 'nullable|numeric|min:0',
+            'vehicles.*.retention_next_day_rate'       => 'nullable|numeric|min:0',
+            'vehicles.*.retention_extra_days'          => 'nullable|integer|min:0',
+            'vehicles.*.retention_night_rate'          => 'nullable|numeric|min:0',
+            'vehicles.*.delivery_challan_id'           => 'nullable|exists:delivery_challans,id',
 
-            'remarks'                  => 'nullable|string|max:1000',
-
-            'extra_from_port_id'       => 'nullable|array',
-            'extra_from_port_id.*'     => 'nullable|exists:ports,id',
-            'extra_to_port_id'         => 'nullable|array',
-            'extra_to_port_id.*'       => 'nullable|exists:ports,id',
-            'extra_charges'            => 'nullable|array',
-            'extra_charges.*'          => 'nullable|numeric|min:0',
+            'vehicles.*.extra_port'                    => 'nullable|array',
+            'vehicles.*.extra_port.*.port_id'           => 'nullable|exists:ports,id',
+            'vehicles.*.extra_port.*.charges'           => 'nullable|numeric|min:0',
         ];
     }
 
@@ -133,107 +152,173 @@ class DailyJobController extends Controller
             return $this->persistPartyToParty($request, $job);
         }
 
+        return $this->persistDirect($request, $job);
+    }
+
+    // Direct jobs — one or more vehicles, each its own line item (item 3).
+    private function persistDirect(Request $request, ?DailyJob $job = null)
+    {
         $data = $request->validate($this->rules());
+        $canFillRates = $this->canFillRates();
 
-        $tripType = $data['trip_type'];
-        $pickup      = (float) ($data['pickup_charges'] ?? 0);
-        $destination = $tripType === 'two_way' ? (float) ($data['destination_charges'] ?? 0) : 0;
-        $dropoff     = (float) ($data['dropoff_charges'] ?? 0);
-        $tripPlanTotal = round($pickup + $destination + $dropoff, 2);
-
-        $perDayFirst = (float) ($data['per_day_first_charges'] ?? 0);
-        $perDayNext  = (float) ($data['per_day_next_rate'] ?? 0);
-        $extraDays   = (int) ($data['per_day_extra_days'] ?? 0);
-        $perDayTotal = round($perDayFirst + ($perDayNext * $extraDays), 2);
-
-        // Extra Port Charges — zip the 3 parallel arrays into rows, drop incomplete ones
-        $extraRows = [];
-        $fromPorts = $request->input('extra_from_port_id', []);
-        $toPorts   = $request->input('extra_to_port_id', []);
-        $charges   = $request->input('extra_charges', []);
-        $extraTotal = 0;
-        foreach ($fromPorts as $i => $fromPortId) {
-            $toPortId = $toPorts[$i] ?? null;
-            $charge   = (float) ($charges[$i] ?? 0);
-            if (!$fromPortId || !$toPortId) {
-                continue;
-            }
-            $extraRows[] = [
-                'from_port_id' => $fromPortId,
-                'to_port_id'   => $toPortId,
-                'charges'      => $charge,
-            ];
-            $extraTotal += $charge;
-        }
-        $extraTotal = round($extraTotal, 2);
-
-        $rent    = (float) ($data['rent'] ?? 0);
-        $labour  = (float) ($data['labour_charges'] ?? 0);
-        $yard    = (float) ($data['yard_charges'] ?? 0);
-        $kanta   = (float) ($data['kanta_charges'] ?? 0);
-        $jobTotal = round($rent + $labour + $yard + $kanta + $tripPlanTotal + $extraTotal + $perDayTotal, 2);
-
-        $payload = [
-            'date'                     => $data['date'],
-            'vehicle_id'               => $data['vehicle_id'],
-            'customer_id'              => $data['customer_id'],
-            'route_id'                 => $data['route_id'],
-            'container_no'             => $data['container_no'] ?? null,
-            'item_description'         => $data['item_description'] ?? null,
-            'rent'                     => $rent,
-            'labour_charges'           => $labour,
-            'yard_charges'             => $yard,
-            'kanta_charges'            => $kanta,
-
-            'trip_type'                => $tripType,
-            'pickup_port_id'           => $data['pickup_port_id'],
-            'pickup_charges'           => $pickup,
-            'destination_location_id'  => $tripType === 'two_way' ? $data['destination_location_id'] : null,
-            'destination_charges'      => $destination,
-            'dropoff_port_id'          => $data['dropoff_port_id'],
-            'dropoff_charges'          => $dropoff,
-            'trip_plan_total'          => $tripPlanTotal,
-
-            'per_day_first_charges'    => $perDayFirst,
-            'per_day_next_rate'        => $perDayNext,
-            'per_day_extra_days'       => $extraDays,
-            'per_day_total'            => $perDayTotal,
-
-            'extra_port_charges_total' => $extraTotal,
-            'job_total'                => $jobTotal,
-            'remarks'                  => $data['remarks'] ?? null,
-            'updated_by'               => auth()->id(),
-        ];
-
-        return DB::transaction(function () use ($job, $payload, $extraRows) {
+        return DB::transaction(function () use ($data, $job, $canFillRates, $request) {
             if ($job) {
-                $job->update($payload);
-                $job->extraPortCharges()->delete();
+                $job->update([
+                    'date'        => $data['date'],
+                    'customer_id' => $data['customer_id'],
+                    'remarks'     => $data['remarks'] ?? null,
+                    'updated_by'  => auth()->id(),
+                ]);
             } else {
-                $payload['job_no']     = $this->nextJobNo();
-                $payload['job_type']   = 'direct';
-                $payload['created_by'] = auth()->id();
-                $job = DailyJob::create($payload);
+                $job = DailyJob::create([
+                    'job_no'          => $this->nextJobNo(),
+                    'job_type'        => 'direct',
+                    // Every new direct job starts 'incomplete' regardless of
+                    // who creates it — it only flips to 'complete' below,
+                    // and only for someone with daily_jobs.fill_rates.
+                    'status'          => 'incomplete',
+                    'date'            => $data['date'],
+                    'customer_id'     => $data['customer_id'],
+                    // Trip Plan no longer carries charges (item 2) — tax
+                    // now applies to the job's grand total instead (item 13).
+                    'trip_plan_total' => 0,
+                    'job_total'       => 0,
+                    'remarks'         => $data['remarks'] ?? null,
+                    'created_by'      => auth()->id(),
+                    'updated_by'      => auth()->id(),
+                ]);
             }
 
-            foreach ($extraRows as $row) {
-                $job->extraPortCharges()->create($row);
+            $existingLineIds = $job->vehicles()->pluck('id')->all();
+            $keptLineIds = [];
+            $jobTotal = 0;
+
+            foreach ($data['vehicles'] as $vRow) {
+                $basic = [
+                    'vehicle_id'       => $vRow['vehicle_id'],
+                    'route_id'         => $vRow['route_id'],
+                    'container_no'     => $vRow['container_no'] ?? null,
+                    'item_description' => $vRow['item_description'] ?? null,
+                ];
+
+                $extraPortRows = [];
+
+                if ($canFillRates) {
+                    $tripType  = $vRow['trip_type'] ?? 'one_way';
+                    $first     = (float) ($vRow['retention_first_day_charges'] ?? 0);
+                    $nextRate  = (float) ($vRow['retention_next_day_rate'] ?? 0);
+                    $extraDays = (int) ($vRow['retention_extra_days'] ?? 0);
+                    $nightRate = (float) ($vRow['retention_night_rate'] ?? 0);
+                    $retentionTotal = DailyJobVehicle::computeRetentionTotal($first, $nextRate, $extraDays, $nightRate);
+
+                    $extraTotal = 0;
+                    foreach (($vRow['extra_port'] ?? []) as $ep) {
+                        if (empty($ep['port_id'])) {
+                            continue;
+                        }
+                        $charge = (float) ($ep['charges'] ?? 0);
+                        $extraPortRows[] = ['port_id' => $ep['port_id'], 'charges' => $charge];
+                        $extraTotal += $charge;
+                    }
+                    $extraTotal = round($extraTotal, 2);
+
+                    $rent   = (float) ($vRow['rent'] ?? 0);
+                    $labour = (float) ($vRow['labour_charges'] ?? 0);
+                    $yard   = (float) ($vRow['yard_charges'] ?? 0);
+                    $kanta  = (float) ($vRow['kanta_charges'] ?? 0);
+                    $lineTotal = round($rent + $labour + $yard + $kanta + $retentionTotal + $extraTotal, 2);
+
+                    $rateFields = [
+                        'trip_type'                   => $tripType,
+                        'pickup_port_id'              => $vRow['pickup_port_id'] ?? null,
+                        'destination_location_id'     => $tripType === 'two_way' ? ($vRow['destination_location_id'] ?? null) : null,
+                        'dropoff_port_id'             => $vRow['dropoff_port_id'] ?? null,
+                        'rent'                        => $rent,
+                        'labour_charges'              => $labour,
+                        'yard_charges'                => $yard,
+                        'kanta_charges'                => $kanta,
+                        'retention_first_day_charges' => $first,
+                        'retention_next_day_rate'     => $nextRate,
+                        'retention_extra_days'        => $extraDays,
+                        'retention_night_rate'        => $nightRate,
+                        'retention_total'             => $retentionTotal,
+                        'extra_port_charges_total'    => $extraTotal,
+                        'line_total'                  => $lineTotal,
+                        'delivery_challan_id'         => $vRow['delivery_challan_id'] ?? null,
+                    ];
+                } else {
+                    // No fill_rates permission — never trust the client for
+                    // gated fields; force them to a clean zero state
+                    // whatever was actually submitted.
+                    $rateFields = [
+                        'trip_type'                   => 'one_way',
+                        'pickup_port_id'              => null,
+                        'destination_location_id'     => null,
+                        'dropoff_port_id'             => null,
+                        'rent'                        => 0,
+                        'labour_charges'               => 0,
+                        'yard_charges'                 => 0,
+                        'kanta_charges'                => 0,
+                        'retention_first_day_charges' => 0,
+                        'retention_next_day_rate'     => 0,
+                        'retention_extra_days'        => 0,
+                        'retention_night_rate'        => 0,
+                        'retention_total'             => 0,
+                        'extra_port_charges_total'    => 0,
+                        'line_total'                  => 0,
+                        'delivery_challan_id'         => null,
+                    ];
+                }
+
+                $lineId = $vRow['id'] ?? null;
+                $line = ($lineId && in_array($lineId, $existingLineIds, true)) ? DailyJobVehicle::find($lineId) : null;
+
+                $payload = array_merge($basic, $rateFields, ['updated_by' => auth()->id()]);
+
+                if ($line) {
+                    $line->update($payload);
+                } else {
+                    $payload['daily_job_id'] = $job->id;
+                    $payload['created_by']   = auth()->id();
+                    $payload['is_legacy']    = false;
+                    $line = DailyJobVehicle::create($payload);
+                }
+
+                // Extra port charges are a rate-field concern — only
+                // touched when the user is allowed to fill rates, so an
+                // assistant's save never wipes out charges an admin already
+                // entered on a row they're also editing.
+                if ($canFillRates) {
+                    $line->extraPortCharges()->delete();
+                    foreach ($extraPortRows as $epRow) {
+                        $line->extraPortCharges()->create($epRow);
+                    }
+                }
+
+                $keptLineIds[] = $line->id;
+                $jobTotal += $line->line_total;
             }
+
+            // Rows removed from the form (vehicle taken off the job) are
+            // dropped — cascades to their extra port charges automatically.
+            $job->vehicles()->whereNotIn('id', $keptLineIds)->delete();
+
+            $updateData = ['job_total' => round($jobTotal, 2)];
+            if ($canFillRates) {
+                $updateData['status'] = $request->boolean('mark_complete') ? 'complete' : 'incomplete';
+            }
+            $job->update($updateData);
 
             return $job;
         });
     }
 
     // Party-to-Party (Vendor to Customer directly) — simple ledger-style row,
-    // no vehicle/route/trip-plan masters involved.
+    // no vehicle/route/trip-plan masters involved. Unaffected by items 2/3/11.
     private function persistPartyToParty(Request $request, ?DailyJob $job = null)
     {
         $data = $request->validate($this->ptyRules());
 
-        // cost   = what we owe the vendor (vendor payable ledger — advance/
-        //          guarantee/balance are all worked out against this).
-        // sale   = what we bill the customer — this is what flows into
-        //          job_total / Bill / Invoice, NOT the cost.
         $cost      = (float) $data['pty_cost'];
         $sale      = (float) $data['pty_sale_amount'];
         $advance   = (float) ($data['pty_advance'] ?? 0);
@@ -252,8 +337,6 @@ class DailyJobController extends Controller
             'pty_advance'     => $advance,
             'pty_guarantee'   => $guarantee,
             'pty_balance'     => $balance,
-            // No trip-plan/tax portion for party-to-party — the sale amount
-            // is carried as job_total / "other charges" (see DailyJob::getOtherChargesTotalAttribute).
             'trip_plan_total' => 0,
             'job_total'       => $sale,
             'remarks'         => $data['remarks'] ?? null,
@@ -268,6 +351,7 @@ class DailyJobController extends Controller
 
             $payload['job_no']     = $this->nextJobNo();
             $payload['job_type']   = 'party_to_party';
+            $payload['status']     = 'complete'; // assistant/admin split doesn't apply to Party-to-Party
             $payload['created_by'] = auth()->id();
 
             return DailyJob::create($payload);
@@ -292,7 +376,9 @@ class DailyJobController extends Controller
 
     public function edit($id)
     {
-        $job = DailyJob::with('extraPortCharges')->findOrFail($id);
+        $job = DailyJob::with([
+            'vehicles.extraPortCharges', 'vehicles.deliveryChallan', 'extraPortCharges',
+        ])->findOrFail($id);
 
         if ($job->bill_id) {
             return redirect()->route('daily-jobs.index')
@@ -325,7 +411,12 @@ class DailyJobController extends Controller
 
     public function show($id)
     {
-        $job = DailyJob::with(['vehicle', 'customer', 'route', 'vendor', 'pickupPort', 'dropoffPort', 'destinationLocation', 'extraPortCharges'])->findOrFail($id);
+        $job = DailyJob::with([
+            'vehicles.vehicle', 'vehicles.route', 'vehicles.pickupPort', 'vehicles.dropoffPort',
+            'vehicles.destinationLocation', 'vehicles.extraPortCharges.port', 'vehicles.deliveryChallan',
+            'customer', 'vendor',
+        ])->findOrFail($id);
+
         return response()->json($job);
     }
 
@@ -349,13 +440,14 @@ class DailyJobController extends Controller
     }
 
     // Print — a single job slip. Branches by job_type since Direct and
-    // Party-to-Party jobs carry completely different data.
+    // Party-to-Party jobs carry completely different data. Direct jobs now
+    // list every vehicle-row (item 3).
     public function print($id)
     {
         $job = DailyJob::with([
-            'vehicle', 'customer', 'vendor', 'route',
-            'pickupPort', 'dropoffPort', 'destinationLocation',
-            'extraPortCharges.fromPort', 'extraPortCharges.toPort',
+            'customer', 'vendor',
+            'vehicles.vehicle', 'vehicles.route', 'vehicles.pickupPort', 'vehicles.dropoffPort',
+            'vehicles.destinationLocation', 'vehicles.extraPortCharges.port', 'vehicles.deliveryChallan',
         ])->findOrFail($id);
 
         $pdf = new \TCPDF();
@@ -380,6 +472,10 @@ class DailyJobController extends Controller
         $pdf->Ln(5);
         $pdf->SetFont('helvetica', '', 10);
 
+        $statusLabel = $job->job_type === 'direct'
+            ? ($job->status === 'incomplete' ? ' (INCOMPLETE — pending rates)' : '')
+            : '';
+
         $infoHtml = '
         <table cellpadding="3" cellspacing="0" width="100%">
             <tr>
@@ -389,7 +485,7 @@ class DailyJobController extends Controller
                 </td>
                 <td width="40%">
                     <table border="1" cellpadding="4" cellspacing="0" style="font-size:10px;">
-                        <tr><td width="40%"><b>Job No.</b></td><td width="60%">' . e($job->job_no) . '</td></tr>
+                        <tr><td width="40%"><b>Job No.</b></td><td width="60%">' . e($job->job_no) . e($statusLabel) . '</td></tr>
                         <tr><td width="40%"><b>Date</b></td><td width="60%">' . $job->date->format('d-m-Y') . '</td></tr>
                         <tr><td width="40%"><b>Type</b></td><td width="60%">' . ($job->job_type === 'party_to_party' ? 'Party-to-Party' : 'Direct') . '</td></tr>
                     </table>
@@ -433,56 +529,52 @@ class DailyJobController extends Controller
             $pdf->SetFont('helvetica', 'B', 11);
             $pdf->Cell(0, 8, 'Profit: ' . number_format($job->pty_profit, 2), 0, 1, 'R');
         } else {
-            $html = '
-            <table border="0.3" cellpadding="4" cellspacing="0" width="100%" style="font-size:10px;">
-                <tr><td width="20%"><b>Vehicle</b></td><td width="30%">' . e($job->vehicle->name ?? '') . ' (' . e($job->vehicle->vehicle_no ?? '') . ')</td>
-                    <td width="20%"><b>Route</b></td><td width="30%">' . e($job->route->name ?? '') . '</td></tr>
-                <tr><td><b>Container #</b></td><td>' . e($job->container_no ?? '') . '</td>
-                    <td><b>Trip Type</b></td><td>' . ($job->trip_type === 'two_way' ? 'Two Way' : 'One Way') . '</td></tr>
-                <tr><td colspan="4"><b>Item Description:</b> ' . e($job->item_description ?? '') . '</td></tr>
-            </table>';
-            $pdf->writeHTML($html, true, false, true, false, '');
-            $pdf->Ln(3);
+            foreach ($job->vehicles as $i => $line) {
+                $pdf->SetFont('helvetica', 'B', 10);
+                $pdf->Cell(0, 6, 'Vehicle ' . ($i + 1) . ' of ' . $job->vehicles->count(), 0, 1, 'L');
 
-            $tripHtml = '
-            <table border="0.3" cellpadding="4" cellspacing="0" width="100%" style="font-size:10px;text-align:center;">
-                <tr style="background-color:#f5f5f5;font-weight:bold;">
-                    <th>Pickup Port</th><th>Pickup Charges</th>
-                    <th>Destination</th><th>Destination Charges</th>
-                    <th>Dropoff Port</th><th>Dropoff Charges</th>
-                </tr>
-                <tr>
-                    <td>' . e($job->pickupPort->name ?? '') . '</td><td>' . number_format($job->pickup_charges, 2) . '</td>
-                    <td>' . e($job->destinationLocation->location_name ?? '—') . '</td><td>' . number_format($job->destination_charges, 2) . '</td>
-                    <td>' . e($job->dropoffPort->name ?? '') . '</td><td>' . number_format($job->dropoff_charges, 2) . '</td>
-                </tr>
-            </table>';
-            $pdf->writeHTML($tripHtml, true, false, true, false, '');
-            $pdf->Ln(3);
+                $tripHtml = '
+                <table border="0.3" cellpadding="4" cellspacing="0" width="100%" style="font-size:10px;">
+                    <tr><td width="20%"><b>Vehicle</b></td><td width="30%">' . e($line->vehicle->name ?? '') . ' (' . e($line->vehicle->vehicle_no ?? '') . ')</td>
+                        <td width="20%"><b>Route</b></td><td width="30%">' . e($line->route->name ?? '') . '</td></tr>
+                    <tr><td><b>Container #</b></td><td>' . e($line->container_no ?? '') . '</td>
+                        <td><b>Trip Type</b></td><td>' . ($line->trip_type === 'two_way' ? 'Two Way' : 'One Way') . '</td></tr>
+                    <tr><td colspan="4"><b>Item Description:</b> ' . e($line->item_description ?? '') . '</td></tr>
+                    <tr><td><b>Pickup Port</b></td><td>' . e($line->pickupPort->name ?? '—') . '</td>
+                        <td><b>Dropoff Port</b></td><td>' . e($line->dropoffPort->name ?? '—') . '</td></tr>
+                    ' . ($line->trip_type === 'two_way' ? '<tr><td><b>Destination</b></td><td colspan="3">' . e($line->destinationLocation->location_name ?? '—') . '</td></tr>' : '') . '
+                    ' . ($line->deliveryChallan ? '<tr><td><b>DC #</b></td><td colspan="3">' . e($line->deliveryChallan->dc_no) . '</td></tr>' : '') . '
+                </table>';
+                $pdf->writeHTML($tripHtml, true, false, true, false, '');
+                $pdf->Ln(2);
 
-            if ($job->extraPortCharges->count()) {
-                $extraHtml = '<table border="0.3" cellpadding="4" cellspacing="0" width="100%" style="font-size:10px;">
-                    <tr style="background-color:#f5f5f5;font-weight:bold;"><th>From Port</th><th>To Port</th><th>Charges</th></tr>';
-                foreach ($job->extraPortCharges as $epc) {
-                    $extraHtml .= '<tr><td>' . e($epc->fromPort->name ?? '') . '</td><td>' . e($epc->toPort->name ?? '') . '</td><td align="right">' . number_format($epc->charges, 2) . '</td></tr>';
+                if ($line->extraPortCharges->count()) {
+                    $extraHtml = '<table border="0.3" cellpadding="4" cellspacing="0" width="100%" style="font-size:10px;">
+                        <tr style="background-color:#f5f5f5;font-weight:bold;"><th>Port</th><th>Charges</th></tr>';
+                    foreach ($line->extraPortCharges as $epc) {
+                        $extraHtml .= '<tr><td>' . e($epc->port->name ?? '') . '</td><td align="right">' . number_format($epc->charges, 2) . '</td></tr>';
+                    }
+                    $extraHtml .= '</table>';
+                    $pdf->writeHTML($extraHtml, true, false, true, false, '');
+                    $pdf->Ln(2);
                 }
-                $extraHtml .= '</table>';
-                $pdf->writeHTML($extraHtml, true, false, true, false, '');
-                $pdf->Ln(3);
+
+                $sumHtml = '
+                <table border="0.3" cellpadding="4" cellspacing="0" width="100%" style="text-align:right;font-size:10px;">
+                    <tr><td width="80%" align="left">Rent</td><td width="20%">' . number_format($line->rent, 2) . '</td></tr>
+                    <tr><td align="left">Labour Charges</td><td>' . number_format($line->labour_charges, 2) . '</td></tr>
+                    <tr><td align="left">Yard Charges</td><td>' . number_format($line->yard_charges, 2) . '</td></tr>
+                    <tr><td align="left">Weight Bridge (Kanta)</td><td>' . number_format($line->kanta_charges, 2) . '</td></tr>
+                    <tr><td align="left">Extra Port Charges</td><td>' . number_format($line->extra_port_charges_total, 2) . '</td></tr>
+                    <tr><td align="left">Retention Charges</td><td>' . number_format($line->retention_total, 2) . '</td></tr>
+                    <tr style="background-color:#f5f5f5;font-weight:bold;"><td align="left">Vehicle Total</td><td>' . number_format($line->line_total, 2) . '</td></tr>
+                </table>';
+                $pdf->writeHTML($sumHtml, true, false, true, false, '');
+                $pdf->Ln(4);
             }
 
-            $sumHtml = '
-            <table border="0.3" cellpadding="4" cellspacing="0" width="100%" style="text-align:right;font-size:10px;">
-                <tr><td width="80%" align="left">Rent</td><td width="20%">' . number_format($job->rent, 2) . '</td></tr>
-                <tr><td align="left">Labour Charges</td><td>' . number_format($job->labour_charges, 2) . '</td></tr>
-                <tr><td align="left">Yard Charges</td><td>' . number_format($job->yard_charges, 2) . '</td></tr>
-                <tr><td align="left">Weight Bridge (Kanta)</td><td>' . number_format($job->kanta_charges, 2) . '</td></tr>
-                <tr><td align="left">Trip Plan Total</td><td>' . number_format($job->trip_plan_total, 2) . '</td></tr>
-                <tr><td align="left">Extra Port Charges</td><td>' . number_format($job->extra_port_charges_total, 2) . '</td></tr>
-                <tr><td align="left">Per Day Charges</td><td>' . number_format($job->per_day_total, 2) . '</td></tr>
-                <tr style="background-color:#f5f5f5;font-weight:bold;"><td align="left">Job Total</td><td>' . number_format($job->job_total, 2) . '</td></tr>
-            </table>';
-            $pdf->writeHTML($sumHtml, true, false, true, false, '');
+            $pdf->SetFont('helvetica', 'B', 12);
+            $pdf->Cell(0, 8, 'Job Grand Total: ' . number_format($job->job_total, 2), 0, 1, 'R');
         }
 
         $pdf->Ln(3);
@@ -504,11 +596,11 @@ class DailyJobController extends Controller
         return $pdf->Output('job_' . $job->job_no . '.pdf', 'I');
     }
 
-    // ── Delivery Challan (DC) ─────────────────────────────────────
-    // Not a separate module — just a printable proof-of-delivery document
-    // against a single Direct job, so it lives as a handful of fields on
-    // the job itself plus a save + print action, gated by the existing
-    // daily_jobs.edit / daily_jobs.print permissions.
+    // ── Legacy Delivery Challan (pre-rewrite direct jobs only) ─────────
+    // Kept exactly as it was before the standalone Delivery Challan module
+    // (item 7) existed — only reachable for jobs that already have a dc_no
+    // on the job header. New jobs use DeliveryChallanController instead and
+    // never populate these columns.
 
     private function nextDcNo(): string
     {
@@ -536,8 +628,6 @@ class DailyJobController extends Controller
         ];
     }
 
-    // Save (or update) the DC fields on a Direct job. Issues a dc_no the
-    // first time; later saves just update the existing snapshot.
     public function saveDc(Request $request, $id)
     {
         try {
@@ -588,7 +678,6 @@ class DailyJobController extends Controller
             $pdf->Image($logoPath, 12, 8, 25);
         }
 
-        // ── Letterhead ────────────────────────────────────────────
         $pdf->SetFont('helvetica', 'B', 16);
         $pdf->SetXY(40, 10);
         $pdf->Cell(0, 7, 'M M LOGISTICS', 0, 1, 'L');
@@ -605,7 +694,6 @@ class DailyJobController extends Controller
         $pdf->Line(10, 30, 200, 30);
         $pdf->Ln(12);
 
-        // ── DC No. / Date ─────────────────────────────────────────
         $pdf->SetFont('helvetica', '', 10);
         $headHtml = '
         <table cellpadding="3" cellspacing="0" width="100%">
@@ -616,7 +704,6 @@ class DailyJobController extends Controller
         </table>';
         $pdf->writeHTML($headHtml, true, false, false, false, '');
 
-        // ── Details block ────────────────────────────────────────
         $detailsHtml = '
         <table border="0.3" cellpadding="4" cellspacing="0" width="100%" style="font-size:10px;">
             <tr>
@@ -645,7 +732,6 @@ class DailyJobController extends Controller
         $pdf->writeHTML($detailsHtml, true, false, true, false, '');
         $pdf->Ln(3);
 
-        // ── Quantity / Description / Truck No. ──────────────────
         $itemHtml = '
         <table border="0.3" cellpadding="4" cellspacing="0" width="100%" style="font-size:10px;">
             <tr style="background-color:#f5f5f5; font-weight:bold;">
@@ -662,7 +748,6 @@ class DailyJobController extends Controller
         $pdf->writeHTML($itemHtml, true, false, true, false, '');
         $pdf->Ln(3);
 
-        // ── For Company Use Only (Gate In / Gate Out — filled by hand) ──
         $pdf->SetFont('helvetica', 'B', 10);
         $pdf->Cell(0, 6, 'FOR COMPANY USE ONLY', 0, 1, 'L');
         $gateHtml = '
@@ -674,7 +759,6 @@ class DailyJobController extends Controller
         </table>';
         $pdf->writeHTML($gateHtml, true, false, true, false, '');
 
-        // ── Signature / stamp area ───────────────────────────────
         $pdf->Ln(18);
         $yPos = $pdf->GetY();
         $lineWidth = 50;

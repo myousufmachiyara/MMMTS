@@ -115,7 +115,12 @@ class InvoiceController extends Controller
                 $taxPct    = $isTaxable ? (float) $data['tax_percent'] : 0;
                 $tripPlanSubtotal = round($bills->sum('trip_plan_subtotal'), 2);
                 $billsSubtotal    = round($bills->sum('total_amount'), 2);
-                $taxAmount = $isTaxable ? round($tripPlanSubtotal * $taxPct / 100, 2) : 0;
+                // Item 13 — tax is applied on the grand total being invoiced
+                // (billsSubtotal, which is each job's full grand total added
+                // up), not just the old Trip Plan portion. Trip Plan no
+                // longer carries its own charges anyway (item 2), so basing
+                // tax on it would previously have zeroed the tax out.
+                $taxAmount = $isTaxable ? round($billsSubtotal * $taxPct / 100, 2) : 0;
                 $total     = round($billsSubtotal + $taxAmount, 2);
                 $totalContainers = (int) $bills->sum(fn ($bill) => $bill->jobs()->count());
 
@@ -289,10 +294,12 @@ class InvoiceController extends Controller
                 <td align="right">' . number_format($invoice->total_amount - $invoice->tax_amount, 2) . '</td>
             </tr>';
 
+        $grandTotalBeforeTax = $invoice->total_amount - $invoice->tax_amount;
+
         if ($invoice->is_taxable) {
             $html .= '
             <tr>
-                <td colspan="4" align="right">Sales Tax (' . rtrim(rtrim(number_format($invoice->tax_percent, 2), '0'), '.') . '% on Trip Plan charges of ' . number_format($invoice->trip_plan_subtotal, 2) . ')</td>
+                <td colspan="4" align="right">Sales Tax (' . rtrim(rtrim(number_format($invoice->tax_percent, 2), '0'), '.') . '% on Grand Total of ' . number_format($grandTotalBeforeTax, 2) . ')</td>
                 <td align="right">' . number_format($invoice->tax_amount, 2) . '</td>
             </tr>';
         }
@@ -308,7 +315,16 @@ class InvoiceController extends Controller
             </tr>';
         $html .= '</table>';
         $pdf->writeHTML($html, true, false, true, false, '');
-        $pdf->Ln(5);
+        $pdf->Ln(3);
+
+        // Item 14 — explicit tax-inclusive/exclusive statement on print.
+        $pdf->SetFont('helvetica', 'I', 8);
+        $taxStatement = $invoice->is_taxable
+            ? ('Amounts above are exclusive of Sales Tax; Sales Tax of ' . rtrim(rtrim(number_format($invoice->tax_percent, 2), '0'), '.') . '% has been added separately as shown above.')
+            : 'This invoice does not include Sales Tax.';
+        $pdf->Cell(0, 5, $taxStatement, 0, 1, 'L');
+        $pdf->SetFont('helvetica', '', 10);
+        $pdf->Ln(2);
 
         if (!empty($invoice->remarks)) {
             $pdf->writeHTML('<b>Remarks:</b><br><span style="font-size:12px;">' . nl2br(e($invoice->remarks)) . '</span>', true, false, true, false, '');

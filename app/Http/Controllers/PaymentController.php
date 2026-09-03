@@ -31,7 +31,10 @@ class PaymentController extends Controller
     {
         // Only invoices with an outstanding balance are payable
         $invoices = Invoice::where('status', '!=', 'cleared')->with('customer')->orderByDesc('id')->get();
-        $accounts = ChartOfAccounts::whereIn('account_type', ['cash', 'bank'])->orderBy('name')->get();
+        // 'expenses' accounts are included so a Benefit/In-Kind line (item 12,
+        // e.g. a fuel card) can be posted against a suitable account like
+        // "Fuel Card Benefit" rather than only cash/bank.
+        $accounts = ChartOfAccounts::whereIn('account_type', ['cash', 'bank', 'expenses'])->orderBy('name')->get();
 
         return view('payments.create', compact('invoices', 'accounts'));
     }
@@ -57,7 +60,13 @@ class PaymentController extends Controller
             'remarks'                 => 'nullable|string|max:1000',
 
             'lines'                   => 'required|array|min:1',
-            'lines.*.method'          => 'required|in:cash,cheque,online_transfer',
+            // 'benefit' (item 12) — an in-kind settlement (e.g. a fuel card)
+            // that reduces the invoice balance the same way a cash/cheque/
+            // online-transfer line does, just against a different account.
+            // A single payment can mix a benefit line with a real
+            // cash/cheque/online-transfer line when only part of the
+            // invoice was settled in kind.
+            'lines.*.method'          => 'required|in:cash,cheque,online_transfer,benefit',
             'lines.*.account_id'      => 'required|exists:chart_of_accounts,id',
             'lines.*.amount'          => 'required|numeric|min:0.01',
             'lines.*.cheque_no'       => 'nullable|required_if:lines.*.method,cheque|string|max:50',

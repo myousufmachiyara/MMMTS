@@ -97,12 +97,12 @@
         </div>
       </div>
       <table class="table table-borderless w-auto ms-auto mt-2 mb-0">
-        <tr><td class="text-end pe-3">Bills Subtotal:</td><td class="text-end" id="sumBills">0.00</td></tr>
-        <tr><td class="text-end pe-3">Trip Plan Subtotal (tax base):</td><td class="text-end" id="sumTripPlan">0.00</td></tr>
+        <tr><td class="text-end pe-3">Bills Subtotal (Grand Total, tax base):</td><td class="text-end" id="sumBills">0.00</td></tr>
         <tr><td class="text-end pe-3">Tax Amount:</td><td class="text-end" id="sumTax">0.00</td></tr>
         <tr class="fw-bold"><td class="text-end pe-3">Total Invoice Amount:</td><td class="text-end" id="sumTotal">0.00</td></tr>
         <tr><td class="text-end pe-3">Total Containers:</td><td class="text-end" id="sumContainers">0</td></tr>
       </table>
+      <p class="text-muted small mt-1 mb-0" id="taxNote"></p>
       <div class="row form-group mt-2">
         <div class="col-lg-9 mb-2">
           <label>Remarks</label>
@@ -180,22 +180,25 @@ document.getElementById('is_taxable').addEventListener('change', toggleTaxField)
 document.getElementById('tax_percent').addEventListener('input', recalcTotal);
 
 function recalcTotal() {
-    var billsSum = 0, tripSum = 0, containers = 0;
+    var billsSum = 0, containers = 0;
     document.querySelectorAll('.bill-check:checked').forEach(function(cb) {
         billsSum += parseFloat(cb.dataset.amount);
-        tripSum += parseFloat(cb.dataset.trip);
         containers += parseInt(cb.dataset.jobs, 10) || 0;
     });
     var isTaxable = document.getElementById('is_taxable').value === '1';
     var taxPct = parseFloat(document.getElementById('tax_percent').value) || 0;
-    var taxAmount = isTaxable ? (tripSum * taxPct / 100) : 0;
+    // Item 13 — tax applies to the grand total being invoiced (billsSum),
+    // not just a Trip Plan portion (Trip Plan carries no charges any more).
+    var taxAmount = isTaxable ? (billsSum * taxPct / 100) : 0;
     var total = billsSum + taxAmount;
 
     document.getElementById('sumBills').textContent = fmt(billsSum);
-    document.getElementById('sumTripPlan').textContent = fmt(tripSum);
     document.getElementById('sumTax').textContent = fmt(taxAmount);
     document.getElementById('sumTotal').textContent = fmt(total);
     document.getElementById('sumContainers').textContent = containers;
+    document.getElementById('taxNote').textContent = isTaxable
+        ? ('Sales Tax of ' + (taxPct || 0) + '% will be added on top of the grand total above.')
+        : 'This invoice will not include Sales Tax.';
 }
 
 document.getElementById('invoiceForm').addEventListener('submit', function(e) {

@@ -5,7 +5,6 @@ namespace App\Http\Controllers;
 use App\Models\VehicleRoute;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
-use Illuminate\Validation\Rule;
 
 class VehicleRouteController extends Controller
 {
@@ -22,13 +21,25 @@ class VehicleRouteController extends Controller
         return view('vehicle_routes.index', compact('routes'));
     }
 
+    // System-generated: R-00001, R-00002, ... (never user-entered)
+    private function nextCode(): string
+    {
+        $last = VehicleRoute::withTrashed()
+            ->where('code', 'like', 'R-%')
+            ->pluck('code')
+            ->map(fn ($c) => (int) substr($c, 2))
+            ->sort()
+            ->last();
+
+        return 'R-' . str_pad(($last ?? 0) + 1, 5, '0', STR_PAD_LEFT);
+    }
+
     public function store(Request $request)
     {
         try {
             Log::info('[VehicleRoute] Store called', ['user_id' => auth()->id()]);
 
             $validated = $request->validate([
-                'code'             => ['required', 'string', 'max:50', Rule::unique('vehicle_routes')->whereNull('deleted_at')],
                 'name'             => 'required|string|max:255',
                 'dimension'        => 'nullable|string|max:50',
                 'union_rent'       => 'nullable|numeric|min:0',
@@ -41,6 +52,7 @@ class VehicleRouteController extends Controller
             ]);
 
             VehicleRoute::create(array_merge($validated, [
+                'code'       => $this->nextCode(),
                 'is_active'  => true,
                 'created_by' => auth()->id(),
                 'updated_by' => auth()->id(),
@@ -68,7 +80,6 @@ class VehicleRouteController extends Controller
             $route = VehicleRoute::findOrFail($id);
 
             $validated = $request->validate([
-                'code'             => ['required', 'string', 'max:50', Rule::unique('vehicle_routes')->ignore($id)->whereNull('deleted_at')],
                 'name'             => 'required|string|max:255',
                 'dimension'        => 'nullable|string|max:50',
                 'union_rent'       => 'nullable|numeric|min:0',

@@ -431,7 +431,7 @@ document.addEventListener('DOMContentLoaded', function () {
 
     // Init Select2 inside modal when it opens
     $(document).on('open.magnificPopup', function() {
-        $('#rv_dr, #rv_cr').select2({ width: '100%' });
+        initSelect2('#rv_dr, #rv_cr');
     });
 });
 </script>

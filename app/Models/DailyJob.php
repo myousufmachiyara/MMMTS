@@ -41,6 +41,10 @@ class DailyJob extends Model
         'remarks',
         'created_by',
         'updated_by',
+        // Assistant/Admin split (item 11) — 'incomplete' jobs were created
+        // by an assistant with only the basic fields; an admin
+        // (daily_jobs.fill_rates) later fills in the rest and flips this.
+        'status',
         // ── Party-to-Party (Vendor to Customer directly) ──
         'vendor_id',
         'pty_vehicle_no',
@@ -106,9 +110,22 @@ class DailyJob extends Model
         return $this->belongsTo(CustomerLocation::class, 'destination_location_id', 'id');
     }
 
+    // Legacy (pre-multi-vehicle) extra port charges — still readable for
+    // jobs created before item 3's rewrite. New jobs use
+    // DailyJobVehicle::extraPortCharges() per vehicle-row instead.
     public function extraPortCharges()
     {
         return $this->hasMany(DailyJobExtraPortCharge::class);
+    }
+
+    // One row per vehicle on this job (item 3 — a Direct job can involve
+    // multiple vehicles, each with its own trip plan / charges / DC).
+    // Every direct job — old or new — has at least one row: pre-rewrite
+    // jobs were backfilled with exactly one (see the
+    // 2026_09_03_000005 migration).
+    public function vehicles()
+    {
+        return $this->hasMany(DailyJobVehicle::class)->orderBy('id');
     }
 
     public function bill()
@@ -116,9 +133,21 @@ class DailyJob extends Model
         return $this->belongsTo(Bill::class);
     }
 
+    // True if ANY vehicle-row on this job still has no Delivery Challan
+    // linked, OR (legacy) the old per-job dc_no was never issued.
     public function getHasDcAttribute(): bool
     {
-        return !empty($this->dc_no);
+        if ($this->job_type !== 'direct') {
+            return false;
+        }
+
+        if (!empty($this->dc_no)) {
+            return true; // legacy single-DC-per-job jobs
+        }
+
+        return $this->relationLoaded('vehicles')
+            ? $this->vehicles->contains(fn ($v) => $v->delivery_challan_id)
+            : $this->vehicles()->whereNotNull('delivery_challan_id')->exists();
     }
 
     // Profit on a Party-to-Party job = what we bill the customer minus what we
@@ -132,21 +161,32 @@ class DailyJob extends Model
         return round((float) $this->pty_sale_amount - (float) $this->pty_cost, 2);
     }
 
-    // "Other charges" = everything except the Trip Plan portion — used when a Bill
-    // adds Trip Plan + Other Charges together but taxes only the Trip Plan slice.
-    // Party-to-Party jobs have no trip-plan/tax portion of their own, so the amount
-    // billed to the customer (pty_sale_amount — NOT pty_cost, which is what we owe
-    // the vendor) is carried entirely as "other charges" here.
+    // "Other charges" = everything except the Trip Plan portion. Trip Plan
+    // no longer carries any charges of its own (item 2) — tax is applied to
+    // the job's grand total instead (item 13) — so for Direct jobs this is
+    // simply the sum of every vehicle-row's line_total (rent + labour +
+    // yard + kanta + retention + extra port charges). Party-to-Party jobs
+    // have no trip-plan/vehicle-row concept, so the amount billed to the
+    // customer (pty_sale_amount — NOT pty_cost, which is what we owe the
+    // vendor) is carried entirely as "other charges" here.
     public function getOtherChargesTotalAttribute()
     {
         if ($this->job_type === 'party_to_party') {
             return round((float) $this->pty_sale_amount, 2);
         }
 
-        return round(
-            $this->rent + $this->labour_charges + $this->yard_charges + $this->kanta_charges
-            + $this->extra_port_charges_total + $this->per_day_total,
-            2
-        );
+        return round($this->vehicles->sum('line_total'), 2);
+    }
+
+    // Retention Charges (formerly "Per Day Charges", item 9) summed across
+    // every vehicle-row — used for the Bill's separate Retention Charges
+    // column (item 10). Not meaningful for Party-to-Party jobs.
+    public function getRetentionChargesTotalAttribute()
+    {
+        if ($this->job_type === 'party_to_party') {
+            return 0;
+        }
+
+        return round($this->vehicles->sum('retention_total'), 2);
     }
 }

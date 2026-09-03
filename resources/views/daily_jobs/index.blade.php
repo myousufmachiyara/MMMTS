@@ -55,11 +55,19 @@
             </select>
           </div>
           <div class="col-lg-2 mb-2">
-            <label>Status</label>
+            <label>Billed</label>
             <select name="billed" class="form-control">
               <option value="all">All</option>
               <option value="billed" {{ request('billed') == 'billed' ? 'selected' : '' }}>Billed</option>
               <option value="non_billed" {{ request('billed') == 'non_billed' ? 'selected' : '' }}>Non-Billed</option>
+            </select>
+          </div>
+          <div class="col-lg-2 mb-2">
+            <label>Completion</label>
+            <select name="status" class="form-control">
+              <option value="all">All</option>
+              <option value="incomplete" {{ request('status') == 'incomplete' ? 'selected' : '' }}>Incomplete</option>
+              <option value="complete" {{ request('status') == 'complete' ? 'selected' : '' }}>Complete</option>
             </select>
           </div>
           <div class="col-lg-1 mb-2 d-flex align-items-end">
@@ -75,12 +83,12 @@
                 <th>Job No.</th>
                 <th>Type</th>
                 <th>Date</th>
-                <th>Vehicle</th>
+                <th>Vehicle(s)</th>
                 <th>Customer</th>
-                <th>Route / Destination</th>
-                <th>Container #</th>
+                <th>Route(s) / Destination</th>
                 <th>Job Total</th>
-                <th>Status</th>
+                <th>Completion</th>
+                <th>Billed</th>
                 <th>DC</th>
                 <th>Action</th>
               </tr>
@@ -96,11 +104,28 @@
                     </span>
                   </td>
                   <td>{{ $row->date->format('d-m-Y') }}</td>
-                  <td>{{ $row->job_type === 'party_to_party' ? ($row->pty_vehicle_no ?? '—') : ($row->vehicle->name ?? '—') }}</td>
+                  <td>
+                    @if($row->job_type === 'party_to_party')
+                      {{ $row->pty_vehicle_no ?? '—' }}
+                    @else
+                      {{ $row->vehicles->pluck('vehicle.name')->filter()->implode(', ') ?: '—' }}
+                      @if($row->vehicles->count() > 1)
+                        <span class="badge bg-light text-dark border">{{ $row->vehicles->count() }} vehicles</span>
+                      @endif
+                    @endif
+                  </td>
                   <td>{{ $row->customer->name ?? '—' }}</td>
-                  <td>{{ $row->job_type === 'party_to_party' ? ($row->pty_destination ?? '—') : ($row->route->name ?? '—') }}</td>
-                  <td>{{ $row->container_no ?? '—' }}</td>
+                  <td>{{ $row->job_type === 'party_to_party' ? ($row->pty_destination ?? '—') : ($row->vehicles->pluck('route.name')->filter()->implode(', ') ?: '—') }}</td>
                   <td class="text-end">{{ number_format($row->job_total, 2) }}</td>
+                  <td>
+                    @if($row->job_type === 'party_to_party')
+                      <span class="text-muted">—</span>
+                    @else
+                      <span class="badge {{ $row->status === 'complete' ? 'bg-success' : 'bg-warning text-dark' }}">
+                          {{ ucfirst($row->status) }}
+                      </span>
+                    @endif
+                  </td>
                   <td>
                     <span class="badge {{ $row->bill_id ? 'bg-success' : 'bg-secondary' }}">
                         {{ $row->bill_id ? 'Billed' : 'Non-Billed' }}
@@ -108,8 +133,8 @@
                   </td>
                   <td>
                     @if($row->job_type === 'direct')
-                      @if($row->dc_no)
-                        <span class="badge bg-success">{{ $row->dc_no }}</span>
+                      @if($row->has_dc)
+                        <span class="badge bg-success">DC issued</span>
                       @else
                         <span class="badge bg-warning text-dark">No DC</span>
                       @endif
@@ -130,16 +155,20 @@
                           <i class="fas fa-print"></i>
                       </a>
                     @endcan
-                    @if($row->job_type === 'direct')
+                    {{-- Legacy per-job DC action — only shown for jobs created before the
+                         standalone Delivery Challan module existed (they already carry a
+                         dc_no on the job header). New jobs link a Delivery Challan per
+                         vehicle-row from the Edit Job screen instead — see delivery-challans.index. --}}
+                    @if($row->job_type === 'direct' && $row->dc_no)
                       @can('daily_jobs.edit')
                         <a class="text-secondary me-1" href="javascript:void(0)"
-                           onclick="openDcModal({{ $row->id }})" title="{{ $row->dc_no ? 'Edit DC' : 'Create DC' }}">
+                           onclick="openDcModal({{ $row->id }})" title="Edit DC (legacy)">
                             <i class="fas fa-file-alt"></i>
                         </a>
                       @endcan
                       @can('daily_jobs.print')
                         @if($row->dc_no)
-                          <a class="text-info me-1" href="{{ route('daily-jobs.printDc', $row->id) }}" target="_blank" title="Print DC">
+                          <a class="text-info me-1" href="{{ route('daily-jobs.printDc', $row->id) }}" target="_blank" title="Print DC (legacy)">
                               <i class="fas fa-print"></i>
                           </a>
                         @endif

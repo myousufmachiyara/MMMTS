@@ -18,6 +18,7 @@ class Bill extends Model
         'bill_date',
         'trip_plan_subtotal',
         'other_charges_subtotal',
+        'retention_charges_subtotal',
         'total_amount',
         'voucher_id',
         'invoice_id',

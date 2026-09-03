@@ -64,9 +64,9 @@
               <th style="width:3%"><input type="checkbox" id="checkAll"></th>
               <th>Job No.</th>
               <th>Date</th>
-              <th>Vehicle</th>
-              <th>Route</th>
-              <th class="text-end">Trip Plan</th>
+              <th>Vehicle(s)</th>
+              <th>Route(s)</th>
+              <th class="text-end">Retention Charges</th>
               <th class="text-end">Other Charges</th>
               <th class="text-end">Job Total</th>
             </tr>
@@ -91,11 +91,11 @@
         </div>
       </div>
       <table class="table table-borderless w-auto ms-auto mt-2 mb-0">
-        <tr><td class="text-end pe-3">Trip Plan Subtotal:</td><td class="text-end" id="sumTripPlan">0.00</td></tr>
+        <tr><td class="text-end pe-3">Retention Charges Subtotal:</td><td class="text-end" id="sumRetention">0.00</td></tr>
         <tr><td class="text-end pe-3">Other Charges Subtotal:</td><td class="text-end" id="sumOther">0.00</td></tr>
-        <tr class="fw-bold"><td class="text-end pe-3">Total Bill Amount:</td><td class="text-end" id="sumTotal">0.00</td></tr>
+        <tr class="fw-bold"><td class="text-end pe-3">Total Bill Amount (Grand Total):</td><td class="text-end" id="sumTotal">0.00</td></tr>
       </table>
-      <p class="text-muted small mt-1 mb-0">Tax (if applicable) is applied later, at Invoice stage, on the combined trip-plan charges of the bills selected.</p>
+      <p class="text-muted small mt-1 mb-0">Tax (if applicable) is applied later, at Invoice stage, on the combined grand total of the bills selected.</p>
       <div class="row form-group mt-2">
         <div class="col-lg-9 mb-2">
           <label>Remarks</label>
@@ -141,13 +141,14 @@ document.getElementById('getJobsBtn').addEventListener('click', function() {
         tbody.innerHTML = '';
         jobs.forEach(function(j) {
             var tr = document.createElement('tr');
+            tr.dataset.trip = j.trip_plan_total;
             tr.innerHTML =
                 '<td><input type="checkbox" class="job-check" name="job_ids[]" value="' + j.id + '"></td>' +
                 '<td>' + j.job_no + '</td>' +
                 '<td>' + j.date + '</td>' +
                 '<td>' + j.vehicle + '</td>' +
                 '<td>' + j.route + '</td>' +
-                '<td class="text-end" data-trip="' + j.trip_plan_total + '">' + fmt(j.trip_plan_total) + '</td>' +
+                '<td class="text-end" data-retention="' + j.retention_charges_total + '">' + fmt(j.retention_charges_total) + '</td>' +
                 '<td class="text-end" data-other="' + j.other_charges_total + '">' + fmt(j.other_charges_total) + '</td>' +
                 '<td class="text-end">' + fmt(j.job_total) + '</td>';
             tbody.appendChild(tr);
@@ -171,16 +172,17 @@ document.getElementById('jobsPickBody').addEventListener('change', function(e) {
 });
 
 function recalcTotals() {
-    var tripSum = 0, otherSum = 0, count = 0;
+    var tripSum = 0, retentionSum = 0, otherSum = 0, count = 0;
     document.querySelectorAll('.job-check:checked').forEach(function(cb) {
         var tr = cb.closest('tr');
-        tripSum += parseFloat(tr.querySelector('[data-trip]').dataset.trip);
+        tripSum += parseFloat(tr.dataset.trip || 0);
+        retentionSum += parseFloat(tr.querySelector('[data-retention]').dataset.retention);
         otherSum += parseFloat(tr.querySelector('[data-other]').dataset.other);
         count++;
     });
     var total = tripSum + otherSum;
 
-    document.getElementById('sumTripPlan').textContent = fmt(tripSum);
+    document.getElementById('sumRetention').textContent = fmt(retentionSum);
     document.getElementById('sumOther').textContent = fmt(otherSum);
     document.getElementById('sumTotal').textContent = fmt(total);
     document.getElementById('containerCount').textContent = count;

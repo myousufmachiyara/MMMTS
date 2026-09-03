@@ -56,7 +56,7 @@
       </div>
 
       <hr>
-      <h5>Payment Methods <small class="text-muted">(split across cash / cheque / online transfer as needed — must total the amount above)</small></h5>
+      <h5>Payment Methods <small class="text-muted">(split across cash / cheque / online transfer / benefit as needed — must total the amount above)</small></h5>
       <div class="table-responsive">
         <table class="table table-bordered mb-2" id="linesTable">
           <thead>
@@ -85,8 +85,17 @@
 
 @include('layouts.partials.modal-scripts')
 
+@php
+    // Computed here rather than inline inside @json() below — Blade's @json()
+    // splits its raw argument text on every comma looking for an optional
+    // encoding-options argument, with no awareness of nesting, so a
+    // multi-key array-map expression can be silently mis-split. A bare
+    // variable has no top-level comma and is always safe.
+    $accountsData = $accounts->map(fn ($a) => ['id' => $a->id, 'name' => $a->name]);
+@endphp
+
 <script>
-var accounts = @json($accounts->map(fn($a) => ['id' => $a->id, 'name' => $a->name]));
+var accounts = @json($accountsData);
 var lineIndex = 0;
 
 function accountOptionsHtml() {
@@ -104,15 +113,16 @@ function addLine() {
             '<option value="cash">Cash</option>' +
             '<option value="cheque">Cheque</option>' +
             '<option value="online_transfer">Online Transfer</option>' +
+            '<option value="benefit">Benefit / In-Kind</option>' +
         '</select></td>' +
         '<td><select class="form-control select2-js line-account" name="lines[' + i + '][account_id]" required>' + accountOptionsHtml() + '</select></td>' +
         '<td><input type="number" step="any" class="form-control line-amount" name="lines[' + i + '][amount]" required></td>' +
         '<td><input type="text" class="form-control line-cheque-no" name="lines[' + i + '][cheque_no]" disabled></td>' +
         '<td><input type="date" class="form-control line-cheque-date" name="lines[' + i + '][cheque_date]" disabled></td>' +
-        '<td><input type="text" class="form-control line-reference" name="lines[' + i + '][reference]"></td>' +
+        '<td><input type="text" class="form-control line-reference" name="lines[' + i + '][reference]" placeholder="e.g. Fuel Card #1234"></td>' +
         '<td><button type="button" class="btn btn-link text-danger p-0 remove-line"><i class="fas fa-times"></i></button></td>';
     document.getElementById('linesBody').appendChild(tr);
-    $(tr.querySelector('.select2-js')).select2({ width: '100%' });
+    initSelect2(tr);
 }
 
 document.getElementById('addLineBtn').addEventListener('click', addLine);

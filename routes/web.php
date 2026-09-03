@@ -29,6 +29,7 @@ use App\Http\Controllers\{
     CustomerLocationController,
     VehicleRouteController,
     DailyJobController,
+    DeliveryChallanController,
     BillController,
     InvoiceController,
     PaymentController,
@@ -54,12 +55,16 @@ Route::middleware(['auth'])->group(function () {
     Route::put('/vehicle-routes/{id}/toggle-active', [VehicleRouteController::class, 'toggleActive'])->middleware('check.permission:vehicle_routes.edit')->name('vehicle-routes.toggleActive');
 
     // AJAX picker endpoints — must be registered BEFORE the generic "$uri/{id}" loop below,
-    // otherwise "bills/get-jobs" / "invoices/get-bills" would be swallowed by the {id} route.
+    // otherwise "bills/get-jobs" / "invoices/get-bills" / "delivery-challans/unlinked"
+    // would be swallowed by the {id} route.
     Route::get('/bills/get-jobs', [BillController::class, 'getJobs'])->middleware('check.permission:bills.index')->name('bills.getJobs');
     Route::get('/invoices/get-bills', [InvoiceController::class, 'getBills'])->middleware('check.permission:invoices.index')->name('invoices.getBills');
+    Route::get('/delivery-challans/unlinked', [DeliveryChallanController::class, 'unlinked'])->middleware('check.permission:delivery_challans.index')->name('delivery-challans.unlinked');
 
-    // Delivery Challan — not a separate module, just a save + print action
-    // against a single Direct job (see DailyJobController).
+    // Legacy Delivery Challan fields — kept only for jobs created before the
+    // standalone Delivery Challan module (see DeliveryChallanController)
+    // existed. New jobs never populate daily_jobs.dc_* again; they link a
+    // standalone DeliveryChallan to a vehicle-row instead.
     Route::put('/daily-jobs/{id}/dc', [DailyJobController::class, 'saveDc'])->middleware('check.permission:daily_jobs.edit')->name('daily-jobs.saveDc');
     Route::get('/daily-jobs/{id}/dc/print', [DailyJobController::class, 'printDc'])->middleware('check.permission:daily_jobs.print')->name('daily-jobs.printDc');
 
@@ -85,6 +90,7 @@ Route::middleware(['auth'])->group(function () {
 
         // Operations
         'daily-jobs' => ['controller' => DailyJobController::class, 'permission' => 'daily_jobs'],
+        'delivery-challans' => ['controller' => DeliveryChallanController::class, 'permission' => 'delivery_challans'],
         'bills' => ['controller' => BillController::class, 'permission' => 'bills'],
         'invoices' => ['controller' => InvoiceController::class, 'permission' => 'invoices'],
         'payments' => ['controller' => PaymentController::class, 'permission' => 'payments'],

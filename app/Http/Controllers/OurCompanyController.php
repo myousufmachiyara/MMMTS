@@ -6,7 +6,6 @@ use App\Models\OurCompany;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
-use Illuminate\Validation\Rule;
 
 class OurCompanyController extends Controller
 {
@@ -23,13 +22,25 @@ class OurCompanyController extends Controller
         return view('our_companies.index', compact('companies'));
     }
 
+    // System-generated: C-0001, C-0002, ... (never user-entered)
+    private function nextCode(): string
+    {
+        $last = OurCompany::withTrashed()
+            ->where('code', 'like', 'C-%')
+            ->pluck('code')
+            ->map(fn ($c) => (int) substr($c, 2))
+            ->sort()
+            ->last();
+
+        return 'C-' . str_pad(($last ?? 0) + 1, 4, '0', STR_PAD_LEFT);
+    }
+
     public function store(Request $request)
     {
         try {
             Log::info('[OurCompany] Store called', ['user_id' => auth()->id()]);
 
             $validated = $request->validate([
-                'code'       => ['required', 'string', 'max:50', Rule::unique('our_companies')->whereNull('deleted_at')],
                 'name'       => 'required|string|max:255',
                 'ntn'        => 'nullable|string|max:50',
                 'logo'       => 'nullable|image|max:2048',
@@ -42,7 +53,7 @@ class OurCompanyController extends Controller
                 : null;
 
             OurCompany::create([
-                'code'       => $validated['code'],
+                'code'       => $this->nextCode(),
                 'name'       => $validated['name'],
                 'ntn'        => $validated['ntn'] ?? null,
                 'logo'       => $logoPath,
@@ -81,7 +92,6 @@ class OurCompanyController extends Controller
             $company = OurCompany::findOrFail($id);
 
             $validated = $request->validate([
-                'code'       => ['required', 'string', 'max:50', Rule::unique('our_companies')->ignore($id)->whereNull('deleted_at')],
                 'name'       => 'required|string|max:255',
                 'ntn'        => 'nullable|string|max:50',
                 'logo'       => 'nullable|image|max:2048',
@@ -97,8 +107,8 @@ class OurCompanyController extends Controller
                 $logoPath = $request->file('logo')->store('companies/logos', 'public');
             }
 
+            // code is system-generated and never changes after creation
             $company->update([
-                'code'       => $validated['code'],
                 'name'       => $validated['name'],
                 'ntn'        => $validated['ntn'] ?? null,
                 'logo'       => $logoPath,

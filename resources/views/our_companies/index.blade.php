@@ -107,9 +107,8 @@
           </header>
           <div class="card-body">
             <div class="row form-group">
-              <div class="col-lg-6 mb-2">
-                <label>Code <span class="text-danger">*</span></label>
-                <input type="text" class="form-control" name="code" placeholder="Company Code" required>
+              <div class="col-lg-12 mb-2">
+                <small class="text-muted">Code will be generated automatically (e.g. C-0001).</small>
               </div>
               <div class="col-lg-6 mb-2">
                 <label>Name <span class="text-danger">*</span></label>
@@ -155,8 +154,8 @@
           <div class="card-body">
             <div class="row form-group">
               <div class="col-lg-6 mb-2">
-                <label>Code <span class="text-danger">*</span></label>
-                <input type="text" id="edit_code" class="form-control" name="code" required>
+                <label>Code</label>
+                <input type="text" id="edit_code" class="form-control" readonly disabled>
               </div>
               <div class="col-lg-6 mb-2">
                 <label>Name <span class="text-danger">*</span></label>

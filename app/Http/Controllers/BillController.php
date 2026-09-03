@@ -46,25 +46,31 @@ class BillController extends Controller
             'to_date'     => 'required|date|after_or_equal:from_date',
         ]);
 
-        $jobs = DailyJob::with(['vehicle', 'route', 'vendor'])
+        $jobs = DailyJob::with(['vehicles.vehicle', 'vehicles.route', 'vendor'])
             ->where('customer_id', $request->customer_id)
             ->whereNull('bill_id')
+            // An 'incomplete' Direct job (item 11 — assistant hasn't had its
+            // rates filled in by an admin yet) has no real charges to bill.
+            ->where(function ($q) {
+                $q->where('job_type', 'party_to_party')->orWhere('status', 'complete');
+            })
             ->whereBetween('date', [$request->from_date, $request->to_date])
             ->orderBy('date')
             ->get()
             ->map(function ($job) {
                 $isPty = $job->job_type === 'party_to_party';
                 return [
-                    'id'                  => $job->id,
-                    'job_no'              => $job->job_no,
-                    'job_type'            => $job->job_type,
-                    'date'                => $job->date->format('Y-m-d'),
-                    'vehicle'             => $isPty ? ($job->pty_vehicle_no ?? '—') : ($job->vehicle->name ?? '—'),
-                    'route'               => $isPty ? ($job->pty_destination ?? '—') : ($job->route->name ?? '—'),
-                    'vendor'              => $isPty ? ($job->vendor->name ?? '—') : null,
-                    'trip_plan_total'     => (float) $job->trip_plan_total,
-                    'other_charges_total' => (float) $job->other_charges_total,
-                    'job_total'           => (float) $job->job_total,
+                    'id'                       => $job->id,
+                    'job_no'                   => $job->job_no,
+                    'job_type'                 => $job->job_type,
+                    'date'                     => $job->date->format('Y-m-d'),
+                    'vehicle'                  => $isPty ? ($job->pty_vehicle_no ?? '—') : ($job->vehicles->pluck('vehicle.name')->filter()->implode(', ') ?: '—'),
+                    'route'                    => $isPty ? ($job->pty_destination ?? '—') : ($job->vehicles->pluck('route.name')->filter()->implode(', ') ?: '—'),
+                    'vendor'                   => $isPty ? ($job->vendor->name ?? '—') : null,
+                    'trip_plan_total'          => (float) $job->trip_plan_total,
+                    'retention_charges_total'  => (float) $job->retention_charges_total,
+                    'other_charges_total'      => (float) $job->other_charges_total,
+                    'job_total'                => (float) $job->job_total,
                 ];
             });
 
@@ -111,20 +117,27 @@ class BillController extends Controller
             $bill = DB::transaction(function () use ($data) {
                 // Never trust client-side totals — recompute from the live job records,
                 // scoped to this customer and still non-billed (avoids double-billing races).
-                $jobs = DailyJob::where('customer_id', $data['customer_id'])
+                $jobs = DailyJob::with('vehicles')
+                    ->where('customer_id', $data['customer_id'])
                     ->whereNull('bill_id')
+                    // Mirrors getJobs() — never bill a Direct job an admin
+                    // hasn't finished filling rates into yet (item 11).
+                    ->where(function ($q) {
+                        $q->where('job_type', 'party_to_party')->orWhere('status', 'complete');
+                    })
                     ->whereIn('id', $data['job_ids'])
                     ->lockForUpdate()
                     ->get();
 
                 if ($jobs->isEmpty()) {
-                    throw new \RuntimeException('Selected jobs are no longer available to bill (already billed or invalid).');
+                    throw new \RuntimeException('Selected jobs are no longer available to bill (already billed, invalid, or still incomplete).');
                 }
 
-                $tripPlanSubtotal   = round($jobs->sum('trip_plan_total'), 2);
-                $otherChargesSubtotal = round($jobs->sum('other_charges_total'), 2);
+                $tripPlanSubtotal      = round($jobs->sum('trip_plan_total'), 2);
+                $retentionChargesSubtotal = round($jobs->sum('retention_charges_total'), 2);
+                $otherChargesSubtotal  = round($jobs->sum('other_charges_total'), 2);
                 // No tax at Bill level — tax (if any) is applied on the Invoice, on top
-                // of the combined trip-plan charges of the bills it aggregates.
+                // of the combined grand totals of the bills it aggregates (item 13).
                 $total = round($tripPlanSubtotal + $otherChargesSubtotal, 2);
 
                 $billNo = $this->nextBillNo();
@@ -145,14 +158,15 @@ class BillController extends Controller
                 }
 
                 $bill = Bill::create([
-                    'bill_no'                => $billNo,
-                    'customer_id'            => $data['customer_id'],
-                    'from_date'              => $data['from_date'],
-                    'to_date'                => $data['to_date'],
-                    'bill_date'              => $data['bill_date'],
-                    'trip_plan_subtotal'     => $tripPlanSubtotal,
-                    'other_charges_subtotal' => $otherChargesSubtotal,
-                    'total_amount'           => $total,
+                    'bill_no'                     => $billNo,
+                    'customer_id'                 => $data['customer_id'],
+                    'from_date'                   => $data['from_date'],
+                    'to_date'                     => $data['to_date'],
+                    'bill_date'                   => $data['bill_date'],
+                    'trip_plan_subtotal'          => $tripPlanSubtotal,
+                    'other_charges_subtotal'      => $otherChargesSubtotal,
+                    'retention_charges_subtotal'  => $retentionChargesSubtotal,
+                    'total_amount'                => $total,
                     'voucher_id'             => $voucher->id ?? null,
                     'remarks'                => $data['remarks'] ?? null,
                     'created_by'             => auth()->id(),
@@ -235,7 +249,7 @@ class BillController extends Controller
     // Print — Bill PDF itemising the jobs it aggregates.
     public function print($id)
     {
-        $bill = Bill::with(['customer', 'jobs.vehicle', 'jobs.route', 'jobs.vendor'])->findOrFail($id);
+        $bill = Bill::with(['customer', 'jobs.vehicles.vehicle', 'jobs.vehicles.route', 'jobs.vendor'])->findOrFail($id);
 
         $pdf = new \TCPDF();
         $pdf->setPrintHeader(false);
@@ -280,12 +294,13 @@ class BillController extends Controller
         $html = '<table border="0.3" cellpadding="4" style="text-align:center;font-size:10px;">
             <tr style="background-color:#f5f5f5; font-weight:bold;">
                 <th width="6%">S.No</th>
-                <th width="18%">Job No.</th>
-                <th width="12%">Date</th>
-                <th width="20%">Vehicle / Vendor</th>
-                <th width="20%">Route / Destination</th>
-                <th width="12%">Trip Plan</th>
-                <th width="12%">Other Charges</th>
+                <th width="16%">Job No.</th>
+                <th width="10%">Date</th>
+                <th width="17%">Vehicle / Vendor</th>
+                <th width="17%">Route / Destination</th>
+                <th width="12%">Retention Charges</th>
+                <th width="11%">Other Charges</th>
+                <th width="11%">Job Total</th>
             </tr>';
 
         foreach ($bill->jobs as $i => $job) {
@@ -294,33 +309,42 @@ class BillController extends Controller
                 <td>' . ($i + 1) . '</td>
                 <td>' . e($job->job_no) . '</td>
                 <td>' . $job->date->format('d-m-Y') . '</td>
-                <td>' . e($isPty ? ($job->vendor->name ?? '—') : ($job->vehicle->name ?? '—')) . '</td>
-                <td>' . e($isPty ? ($job->pty_destination ?? '—') : ($job->route->name ?? '—')) . '</td>
-                <td align="right">' . number_format($job->trip_plan_total, 2) . '</td>
+                <td>' . e($isPty ? ($job->vendor->name ?? '—') : ($job->vehicles->pluck('vehicle.name')->filter()->implode(', ') ?: '—')) . '</td>
+                <td>' . e($isPty ? ($job->pty_destination ?? '—') : ($job->vehicles->pluck('route.name')->filter()->implode(', ') ?: '—')) . '</td>
+                <td align="right">' . number_format($job->retention_charges_total, 2) . '</td>
                 <td align="right">' . number_format($job->other_charges_total, 2) . '</td>
+                <td align="right">' . number_format($job->job_total, 2) . '</td>
             </tr>';
         }
 
         $html .= '
             <tr style="background-color:#f5f5f5;">
-                <td colspan="5" align="right">Trip Plan Subtotal</td>
-                <td colspan="2" align="right">' . number_format($bill->trip_plan_subtotal, 2) . '</td>
+                <td colspan="5" align="right">Retention Charges Subtotal</td>
+                <td colspan="3" align="right">' . number_format($bill->retention_charges_subtotal, 2) . '</td>
             </tr>
             <tr style="background-color:#f5f5f5;">
                 <td colspan="5" align="right">Other Charges Subtotal</td>
-                <td colspan="2" align="right">' . number_format($bill->other_charges_subtotal, 2) . '</td>
+                <td colspan="3" align="right">' . number_format($bill->other_charges_subtotal, 2) . '</td>
             </tr>
             <tr style="background-color:#f5f5f5;">
-                <td colspan="5" align="right"><b>Total Bill Amount</b></td>
-                <td colspan="2" align="right"><b>' . number_format($bill->total_amount, 2) . '</b></td>
+                <td colspan="5" align="right"><b>Total Bill Amount (Grand Total)</b></td>
+                <td colspan="3" align="right"><b>' . number_format($bill->total_amount, 2) . '</b></td>
             </tr>
             <tr>
                 <td colspan="5" align="right">Total Containers</td>
-                <td colspan="2" align="right">' . $bill->container_count . '</td>
+                <td colspan="3" align="right">' . $bill->container_count . '</td>
             </tr>';
         $html .= '</table>';
         $pdf->writeHTML($html, true, false, true, false, '');
-        $pdf->Ln(5);
+        $pdf->Ln(3);
+
+        // Item 14 — make explicit that Sales Tax, when applicable, is a
+        // separate line added at the Invoice stage on top of this bill's
+        // grand total, not included in the figure above.
+        $pdf->SetFont('helvetica', 'I', 8);
+        $pdf->Cell(0, 5, 'Note: amounts above do not include Sales Tax. Tax, where applicable, is calculated on the invoiced grand total and shown on the Invoice.', 0, 1, 'L');
+        $pdf->SetFont('helvetica', '', 10);
+        $pdf->Ln(2);
 
         if (!empty($bill->remarks)) {
             $pdf->writeHTML('<b>Remarks:</b><br><span style="font-size:12px;">' . nl2br(e($bill->remarks)) . '</span>', true, false, true, false, '');

@@ -370,7 +370,7 @@ $(document).on('click', '.modal-dismiss, .mfp-close', function() {
 
 // ── DataTable + Select2 ──────────────────────────────────────────
 $(document).ready(function() {
-    $('.select2-js').select2({ width: '100%' });
+    initSelect2();
     $('#voucher-datatable').DataTable({
         pageLength: 50,
         order: [[0, 'desc']],

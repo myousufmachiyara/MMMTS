@@ -30,9 +30,9 @@ class DatabaseSeeder extends Seeder
 
         // 🔑 Create Super Admin User
         $admin = User::firstOrCreate(
-            ['username' => 'admin'],
+            ['username' => 'yousuf'],
             [
-                'name' => 'Admin',
+                'name' => 'Yousuf',
                 'email' => null,
                 'password' => Hash::make('12345678'),
             ]
@@ -63,6 +63,7 @@ class DatabaseSeeder extends Seeder
 
             // Operations
             'daily_jobs',
+            'delivery_challans',
             'bills',
             'invoices',
             'payments',
@@ -77,6 +78,15 @@ class DatabaseSeeder extends Seeder
                 ]);
             }
         }
+
+        // Assistant/Admin split on Daily Jobs (item 11): an assistant with
+        // only daily_jobs.create/edit can initiate/edit a job's BASIC fields
+        // (date, vehicle, customer, route, container, item description) —
+        // this extra permission gates the RATE fields (trip plan ports,
+        // rent/labour/yard/kanta, retention charges, extra port charges,
+        // DC linking) and the "mark complete" toggle. Not part of the
+        // generic $actions loop above since it isn't a CRUD action.
+        Permission::firstOrCreate(['name' => 'daily_jobs.fill_rates']);
 
         // 📊 Report permissions
         $reports = ['accounts', 'fleet'];
