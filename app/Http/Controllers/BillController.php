@@ -264,15 +264,26 @@ class BillController extends Controller
         $pdf->AddPage();
         $pdf->setCellPadding(1.5);
 
-        $pdf->SetFont('helvetica', 'B', 14);
-        $pdf->SetXY(120, 12);
-        $pdf->Cell(80, 8, 'BILL', 0, 1, 'R');
+        $pdf->SetFont('helvetica', 'B', 16);
+        $pdf->SetXY(10, 10);
+        $pdf->Cell(0, 7, 'M M LOGISTICS', 0, 1, 'L');
+        $pdf->SetFont('helvetica', '', 9);
+        $pdf->SetXY(10, 17);
+        $pdf->Cell(0, 5, 'Room No 301/307, 3rd Floor, Custom Trade Tower,', 0, 1, 'L');
+        $pdf->SetXY(10, 22);
+        $pdf->Cell(0, 5, 'KPT Stadium, Kharadar, Karachi', 0, 1, 'L');
 
-        $pdf->Ln(5);
+        $pdf->SetFont('helvetica', 'B', 14);
+        $pdf->SetXY(140, 10);
+        $pdf->Cell(60, 6, 'BILL', 0, 1, 'R');
+        $pdf->SetFont('helvetica', 'B', 10);
+
+        $pdf->Line(10, 30, 200, 30);
+        $pdf->Ln(12);
         $pdf->SetFont('helvetica', '', 10);
 
         $infoHtml = '
-        <table cellpadding="3" cellspacing="0" width="60%">
+        <table cellpadding="3" cellspacing="0" width="100%">
             <tr>
                 <td width="60%">
                     <b>' . e($bill->customer->name ?? '') . '</b><br>
