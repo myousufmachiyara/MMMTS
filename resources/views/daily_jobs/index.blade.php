@@ -115,7 +115,7 @@
                     @endif
                   </td>
                   <td>{{ $row->customer->name ?? '—' }}</td>
-                  <td>{{ $row->job_type === 'party_to_party' ? ($row->pty_destination ?? '—') : ($row->vehicles->pluck('route.name')->filter()->implode(', ') ?: '—') }}</td>
+                  <td>{{ $row->job_type === 'party_to_party' ? ($row->pty_destination ?? '—') : ($row->route->name ?? ($row->vehicles->pluck('route.name')->filter()->implode(', ') ?: '—')) }}</td>
                   <td class="text-end">{{ number_format($row->job_total, 2) }}</td>
                   <td>
                     @if($row->job_type === 'party_to_party')

@@ -46,7 +46,7 @@ class BillController extends Controller
             'to_date'     => 'required|date|after_or_equal:from_date',
         ]);
 
-        $jobs = DailyJob::with(['vehicles.vehicle', 'vehicles.route', 'vendor'])
+        $jobs = DailyJob::with(['vehicles.vehicle', 'route', 'vendor'])
             ->where('customer_id', $request->customer_id)
             ->whereNull('bill_id')
             // An 'incomplete' Direct job (item 11 — assistant hasn't had its
@@ -65,7 +65,10 @@ class BillController extends Controller
                     'job_type'                 => $job->job_type,
                     'date'                     => $job->date->format('Y-m-d'),
                     'vehicle'                  => $isPty ? ($job->pty_vehicle_no ?? '—') : ($job->vehicles->pluck('vehicle.name')->filter()->implode(', ') ?: '—'),
-                    'route'                    => $isPty ? ($job->pty_destination ?? '—') : ($job->vehicles->pluck('route.name')->filter()->implode(', ') ?: '—'),
+                    // Route is shared across every vehicle on the job — read
+                    // from the job header, falling back to a per-vehicle
+                    // pluck only for older jobs saved before that change.
+                    'route'                    => $isPty ? ($job->pty_destination ?? '—') : ($job->route->name ?? ($job->vehicles->pluck('route.name')->filter()->implode(', ') ?: '—')),
                     'vendor'                   => $isPty ? ($job->vendor->name ?? '—') : null,
                     'trip_plan_total'          => (float) $job->trip_plan_total,
                     'retention_charges_total'  => (float) $job->retention_charges_total,
@@ -249,7 +252,7 @@ class BillController extends Controller
     // Print — Bill PDF itemising the jobs it aggregates.
     public function print($id)
     {
-        $bill = Bill::with(['customer', 'jobs.vehicles.vehicle', 'jobs.vehicles.route', 'jobs.vendor'])->findOrFail($id);
+        $bill = Bill::with(['customer', 'jobs.vehicles.vehicle', 'jobs.route', 'jobs.vendor'])->findOrFail($id);
 
         $pdf = new \TCPDF();
         $pdf->setPrintHeader(false);
@@ -310,7 +313,7 @@ class BillController extends Controller
                 <td>' . e($job->job_no) . '</td>
                 <td>' . $job->date->format('d-m-Y') . '</td>
                 <td>' . e($isPty ? ($job->vendor->name ?? '—') : ($job->vehicles->pluck('vehicle.name')->filter()->implode(', ') ?: '—')) . '</td>
-                <td>' . e($isPty ? ($job->pty_destination ?? '—') : ($job->vehicles->pluck('route.name')->filter()->implode(', ') ?: '—')) . '</td>
+                <td>' . e($isPty ? ($job->pty_destination ?? '—') : ($job->route->name ?? ($job->vehicles->pluck('route.name')->filter()->implode(', ') ?: '—'))) . '</td>
                 <td align="right">' . number_format($job->retention_charges_total, 2) . '</td>
                 <td align="right">' . number_format($job->other_charges_total, 2) . '</td>
                 <td align="right">' . number_format($job->job_total, 2) . '</td>
