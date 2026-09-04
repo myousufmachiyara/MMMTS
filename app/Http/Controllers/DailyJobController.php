@@ -516,18 +516,13 @@ class DailyJobController extends Controller
         $pdf->AddPage();
         $pdf->setCellPadding(1.5);
 
-        $logoPath = public_path('assets/img/logo.png');
-        if (file_exists($logoPath)) {
-            $pdf->Image($logoPath, 12, 8, 25);
-        }
-
         $pdf->SetFont('helvetica', 'B', 16);
-        $pdf->SetXY(40, 10);
+        $pdf->SetXY(10, 10);
         $pdf->Cell(0, 7, 'M M LOGISTICS', 0, 1, 'L');
         $pdf->SetFont('helvetica', '', 9);
-        $pdf->SetXY(40, 17);
+        $pdf->SetXY(10, 17);
         $pdf->Cell(0, 5, 'Room No 301, 303, 305, 307, 3rd Floor, Custom Trade Tower,', 0, 1, 'L');
-        $pdf->SetXY(40, 22);
+        $pdf->SetXY(10, 22);
         $pdf->Cell(0, 5, 'KPT Stadium, Kharadar, Karachi', 0, 1, 'L');
 
         $pdf->SetFont('helvetica', 'B', 14);
@@ -651,18 +646,14 @@ class DailyJobController extends Controller
 
     private function renderDcPage(\TCPDF $pdf, DeliveryChallan $dc, string $copyLabel, float $yOffset = 0): void
     {
-        $logoPath = public_path('assets/img/logo.png');
-        if (file_exists($logoPath)) {
-            $pdf->Image($logoPath, 12, $yOffset + 8, 25);
-        }
 
         $pdf->SetFont('helvetica', 'B', 16);
-        $pdf->SetXY(40, $yOffset + 10);
+        $pdf->SetXY(10, $yOffset + 10);
         $pdf->Cell(0, 7, 'M M LOGISTICS', 0, 1, 'L');
         $pdf->SetFont('helvetica', '', 9);
-        $pdf->SetXY(40, $yOffset + 17);
+        $pdf->SetXY(10, $yOffset + 17);
         $pdf->Cell(0, 5, 'Room No 301, 303, 305, 307, 3rd Floor, Custom Trade Tower,', 0, 1, 'L');
-        $pdf->SetXY(40, $yOffset + 22);
+        $pdf->SetXY(10, $yOffset + 22);
         $pdf->Cell(0, 5, 'KPT Stadium, Kharadar, Karachi', 0, 1, 'L');
 
         $pdf->SetFont('helvetica', 'B', 14);
