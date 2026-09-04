@@ -201,7 +201,7 @@ class DeliveryChallanController extends Controller
     private function renderDcPage(\TCPDF $pdf, DeliveryChallan $dc, string $copyLabel): void
     {
         $pdf->SetFont('helvetica', 'B', 16);
-        $pdf->SetXY(40, 10);
+        $pdf->SetXY(10, 10);
         $pdf->Cell(0, 7, 'M M LOGISTICS', 0, 1, 'L');
         $pdf->SetFont('helvetica', '', 9);
         $pdf->SetXY(40, 17);
