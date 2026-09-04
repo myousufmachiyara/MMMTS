@@ -36,6 +36,15 @@ class DailyJob extends Model
         'per_day_extra_days',
         'per_day_total',
         'extra_port_charges_total',
+        // Retention Charges (item 9's naming) — shared across every vehicle
+        // on the job (see the 2026_09_04 migration). Not to be confused
+        // with per_day_* above, which is the OLD single-vehicle-era naming
+        // left untouched for historical jobs.
+        'retention_first_day_charges',
+        'retention_next_day_rate',
+        'retention_extra_days',
+        'retention_night_rate',
+        'retention_total',
         'job_total',
         'bill_id',
         'remarks',
@@ -111,15 +120,27 @@ class DailyJob extends Model
     }
 
     // Legacy (pre-multi-vehicle) extra port charges — still readable for
-    // jobs created before item 3's rewrite. New jobs use
-    // DailyJobVehicle::extraPortCharges() per vehicle-row instead.
+    // jobs created before item 3's rewrite. Not used by current code paths;
+    // see sharedExtraPortCharges() for the extra port charges a job created
+    // today actually has.
     public function extraPortCharges()
     {
         return $this->hasMany(DailyJobExtraPortCharge::class);
     }
 
+    // Extra Port Charges are shared across every vehicle on the job (one
+    // list per job, not per vehicle-row) — see the 2026_09_04 migration.
+    public function sharedExtraPortCharges()
+    {
+        return $this->hasMany(DailyJobSharedExtraPortCharge::class);
+    }
+
     // One row per vehicle on this job (item 3 — a Direct job can involve
-    // multiple vehicles, each with its own trip plan / charges / DC).
+    // multiple vehicles). Since the multi-vehicle-form change, a vehicle
+    // row carries only vehicle_id/container_no/delivery_challan_id — route,
+    // trip plan, and every rate/charge field are shared across all of a
+    // job's vehicles and live on the job header instead (see this model's
+    // route_id/rent/retention_* etc. and sharedExtraPortCharges() above).
     // Every direct job — old or new — has at least one row: pre-rewrite
     // jobs were backfilled with exactly one (see the
     // 2026_09_03_000005 migration).
@@ -163,9 +184,11 @@ class DailyJob extends Model
 
     // "Other charges" = everything except the Trip Plan portion. Trip Plan
     // no longer carries any charges of its own (item 2) — tax is applied to
-    // the job's grand total instead (item 13) — so for Direct jobs this is
-    // simply the sum of every vehicle-row's line_total (rent + labour +
-    // yard + kanta + retention + extra port charges). Party-to-Party jobs
+    // the job's grand total instead (item 13). Rent/labour/yard/kanta/
+    // retention/extra-port-charges are shared once across the whole job
+    // (not per vehicle any more — see this model's vehicles() docblock), so
+    // for Direct jobs this is simply those job-header fields added up, once,
+    // regardless of how many vehicles are on the job. Party-to-Party jobs
     // have no trip-plan/vehicle-row concept, so the amount billed to the
     // customer (pty_sale_amount — NOT pty_cost, which is what we owe the
     // vendor) is carried entirely as "other charges" here.
@@ -175,18 +198,22 @@ class DailyJob extends Model
             return round((float) $this->pty_sale_amount, 2);
         }
 
-        return round($this->vehicles->sum('line_total'), 2);
+        return round(
+            (float) $this->rent + (float) $this->labour_charges + (float) $this->yard_charges
+            + (float) $this->kanta_charges + (float) $this->retention_total + (float) $this->extra_port_charges_total,
+            2
+        );
     }
 
-    // Retention Charges (formerly "Per Day Charges", item 9) summed across
-    // every vehicle-row — used for the Bill's separate Retention Charges
-    // column (item 10). Not meaningful for Party-to-Party jobs.
+    // Retention Charges (formerly "Per Day Charges", item 9) — a single
+    // shared amount per job (item 10's Bill column). Not meaningful for
+    // Party-to-Party jobs.
     public function getRetentionChargesTotalAttribute()
     {
         if ($this->job_type === 'party_to_party') {
             return 0;
         }
 
-        return round($this->vehicles->sum('retention_total'), 2);
+        return round((float) $this->retention_total, 2);
     }
 }
