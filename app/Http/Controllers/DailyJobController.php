@@ -439,163 +439,6 @@ class DailyJobController extends Controller
         }
     }
 
-    // Print — a single job slip. Branches by job_type since Direct and
-    // Party-to-Party jobs carry completely different data. Direct jobs now
-    // list every vehicle-row (item 3).
-    public function print($id)
-    {
-        $job = DailyJob::with([
-            'customer', 'vendor',
-            'vehicles.vehicle', 'vehicles.route', 'vehicles.pickupPort', 'vehicles.dropoffPort',
-            'vehicles.destinationLocation', 'vehicles.extraPortCharges.port', 'vehicles.deliveryChallan',
-        ])->findOrFail($id);
-
-        $pdf = new \TCPDF();
-        $pdf->setPrintHeader(false);
-        $pdf->setPrintFooter(false);
-        $pdf->SetCreator('MMMTS');
-        $pdf->SetAuthor('Your Company');
-        $pdf->SetTitle('Job ' . $job->job_no);
-        $pdf->SetMargins(10, 10, 10);
-        $pdf->AddPage();
-        $pdf->setCellPadding(1.5);
-
-        $logoPath = public_path('assets/img/logo.png');
-        if (file_exists($logoPath)) {
-            $pdf->Image($logoPath, 12, 8, 35);
-        }
-
-        $pdf->SetFont('helvetica', 'B', 14);
-        $pdf->SetXY(120, 12);
-        $pdf->Cell(80, 8, 'JOB SLIP', 0, 1, 'R');
-
-        $pdf->Ln(5);
-        $pdf->SetFont('helvetica', '', 10);
-
-        $statusLabel = $job->job_type === 'direct'
-            ? ($job->status === 'incomplete' ? ' (INCOMPLETE — pending rates)' : '')
-            : '';
-
-        $infoHtml = '
-        <table cellpadding="3" cellspacing="0" width="100%">
-            <tr>
-                <td width="60%">
-                    <b>' . e($job->customer->name ?? '') . '</b><br>
-                    ' . e($job->customer->address ?? '') . '
-                </td>
-                <td width="40%">
-                    <table border="1" cellpadding="4" cellspacing="0" style="font-size:10px;">
-                        <tr><td width="40%"><b>Job No.</b></td><td width="60%">' . e($job->job_no) . e($statusLabel) . '</td></tr>
-                        <tr><td width="40%"><b>Date</b></td><td width="60%">' . $job->date->format('d-m-Y') . '</td></tr>
-                        <tr><td width="40%"><b>Type</b></td><td width="60%">' . ($job->job_type === 'party_to_party' ? 'Party-to-Party' : 'Direct') . '</td></tr>
-                    </table>
-                </td>
-            </tr>
-        </table>';
-        $pdf->writeHTML($infoHtml, true, false, false, false, '');
-        $pdf->Ln(3);
-
-        if ($job->job_type === 'party_to_party') {
-            $html = '
-            <table border="0.3" cellpadding="4" cellspacing="0" width="100%" style="font-size:10px;">
-                <tr><td width="30%"><b>Vendor</b></td><td width="70%">' . e($job->vendor->name ?? '') . '</td></tr>
-                <tr><td><b>Vendor Vehicle #</b></td><td>' . e($job->pty_vehicle_no ?? '') . '</td></tr>
-                <tr><td><b>Destination</b></td><td>' . e($job->pty_destination ?? '') . '</td></tr>
-                <tr><td><b>Size</b></td><td>' . e($job->pty_size ?? '') . '</td></tr>
-            </table>';
-            $pdf->writeHTML($html, true, false, true, false, '');
-            $pdf->Ln(3);
-
-            $html2 = '
-            <table border="0.3" cellpadding="4" cellspacing="0" width="100%" style="text-align:right;font-size:10px;">
-                <tr style="background-color:#f5f5f5;font-weight:bold;">
-                    <td width="20%" align="left">Vendor Cost</td>
-                    <td width="20%" align="left">Sale to Customer</td>
-                    <td width="20%" align="left">Advance</td>
-                    <td width="20%" align="left">Guarantee</td>
-                    <td width="20%" align="left">Balance Payable</td>
-                </tr>
-                <tr>
-                    <td>' . number_format($job->pty_cost, 2) . '</td>
-                    <td>' . number_format($job->pty_sale_amount, 2) . '</td>
-                    <td>' . number_format($job->pty_advance, 2) . '</td>
-                    <td>' . number_format($job->pty_guarantee, 2) . '</td>
-                    <td>' . number_format($job->pty_balance, 2) . '</td>
-                </tr>
-            </table>';
-            $pdf->writeHTML($html2, true, false, true, false, '');
-            $pdf->Ln(3);
-
-            $pdf->SetFont('helvetica', 'B', 11);
-            $pdf->Cell(0, 8, 'Profit: ' . number_format($job->pty_profit, 2), 0, 1, 'R');
-        } else {
-            foreach ($job->vehicles as $i => $line) {
-                $pdf->SetFont('helvetica', 'B', 10);
-                $pdf->Cell(0, 6, 'Vehicle ' . ($i + 1) . ' of ' . $job->vehicles->count(), 0, 1, 'L');
-
-                $tripHtml = '
-                <table border="0.3" cellpadding="4" cellspacing="0" width="100%" style="font-size:10px;">
-                    <tr><td width="20%"><b>Vehicle</b></td><td width="30%">' . e($line->vehicle->name ?? '') . ' (' . e($line->vehicle->vehicle_no ?? '') . ')</td>
-                        <td width="20%"><b>Route</b></td><td width="30%">' . e($line->route->name ?? '') . '</td></tr>
-                    <tr><td><b>Container #</b></td><td>' . e($line->container_no ?? '') . '</td>
-                        <td><b>Trip Type</b></td><td>' . ($line->trip_type === 'two_way' ? 'Two Way' : 'One Way') . '</td></tr>
-                    <tr><td colspan="4"><b>Item Description:</b> ' . e($line->item_description ?? '') . '</td></tr>
-                    <tr><td><b>Pickup Port</b></td><td>' . e($line->pickupPort->name ?? '—') . '</td>
-                        <td><b>Dropoff Port</b></td><td>' . e($line->dropoffPort->name ?? '—') . '</td></tr>
-                    ' . ($line->trip_type === 'two_way' ? '<tr><td><b>Destination</b></td><td colspan="3">' . e($line->destinationLocation->location_name ?? '—') . '</td></tr>' : '') . '
-                    ' . ($line->deliveryChallan ? '<tr><td><b>DC #</b></td><td colspan="3">' . e($line->deliveryChallan->dc_no) . '</td></tr>' : '') . '
-                </table>';
-                $pdf->writeHTML($tripHtml, true, false, true, false, '');
-                $pdf->Ln(2);
-
-                if ($line->extraPortCharges->count()) {
-                    $extraHtml = '<table border="0.3" cellpadding="4" cellspacing="0" width="100%" style="font-size:10px;">
-                        <tr style="background-color:#f5f5f5;font-weight:bold;"><th>Port</th><th>Charges</th></tr>';
-                    foreach ($line->extraPortCharges as $epc) {
-                        $extraHtml .= '<tr><td>' . e($epc->port->name ?? '') . '</td><td align="right">' . number_format($epc->charges, 2) . '</td></tr>';
-                    }
-                    $extraHtml .= '</table>';
-                    $pdf->writeHTML($extraHtml, true, false, true, false, '');
-                    $pdf->Ln(2);
-                }
-
-                $sumHtml = '
-                <table border="0.3" cellpadding="4" cellspacing="0" width="100%" style="text-align:right;font-size:10px;">
-                    <tr><td width="80%" align="left">Rent</td><td width="20%">' . number_format($line->rent, 2) . '</td></tr>
-                    <tr><td align="left">Labour Charges</td><td>' . number_format($line->labour_charges, 2) . '</td></tr>
-                    <tr><td align="left">Yard Charges</td><td>' . number_format($line->yard_charges, 2) . '</td></tr>
-                    <tr><td align="left">Weight Bridge (Kanta)</td><td>' . number_format($line->kanta_charges, 2) . '</td></tr>
-                    <tr><td align="left">Extra Port Charges</td><td>' . number_format($line->extra_port_charges_total, 2) . '</td></tr>
-                    <tr><td align="left">Retention Charges</td><td>' . number_format($line->retention_total, 2) . '</td></tr>
-                    <tr style="background-color:#f5f5f5;font-weight:bold;"><td align="left">Vehicle Total</td><td>' . number_format($line->line_total, 2) . '</td></tr>
-                </table>';
-                $pdf->writeHTML($sumHtml, true, false, true, false, '');
-                $pdf->Ln(4);
-            }
-
-            $pdf->SetFont('helvetica', 'B', 12);
-            $pdf->Cell(0, 8, 'Job Grand Total: ' . number_format($job->job_total, 2), 0, 1, 'R');
-        }
-
-        $pdf->Ln(3);
-        if (!empty($job->remarks)) {
-            $pdf->writeHTML('<b>Remarks:</b><br><span style="font-size:10px;">' . nl2br(e($job->remarks)) . '</span>', true, false, true, false, '');
-        }
-
-        $pdf->Ln(18);
-        $yPos = $pdf->GetY();
-        $lineWidth = 40;
-        $pdf->Line(28, $yPos, 28 + $lineWidth, $yPos);
-        $pdf->Line(130, $yPos, 130 + $lineWidth, $yPos);
-        $pdf->SetXY(28, $yPos + 2);
-        $pdf->SetFont('helvetica', '', 9);
-        $pdf->Cell($lineWidth, 6, 'Prepared By', 0, 0, 'C');
-        $pdf->SetXY(130, $yPos + 2);
-        $pdf->Cell($lineWidth, 6, 'Authorized By', 0, 0, 'C');
-
-        return $pdf->Output('job_' . $job->job_no . '.pdf', 'I');
-    }
-
     // ── Legacy Delivery Challan (pre-rewrite direct jobs only) ─────────
     // Kept exactly as it was before the standalone Delivery Challan module
     // (item 7) existed — only reachable for jobs that already have a dc_no
@@ -771,5 +614,158 @@ class DailyJobController extends Controller
         $pdf->Cell($lineWidth, 6, 'WITH COMPANY STAMP', 0, 0, 'C');
 
         return $pdf->Output('dc_' . $job->dc_no . '.pdf', 'I');
+    }
+
+
+     public function print($id)
+    {
+        $dc = DeliveryChallan::with(['customer', 'port', 'vehicleLine.dailyJob.vehicle'])->findOrFail($id);
+
+        $pdf = new \TCPDF();
+        $pdf->setPrintHeader(false);
+        $pdf->setPrintFooter(false);
+        $pdf->SetCreator('MMMTS');
+        $pdf->SetAuthor('M M Logistics');
+        $pdf->SetTitle('Delivery Challan ' . $dc->dc_no);
+        $pdf->SetMargins(10, 10, 10);
+        $pdf->setCellPadding(1.5);
+        $pdf->SetAutoPageBreak(false, 0);
+        $pdf->AddPage();
+
+        $this->renderDcPage($pdf, $dc, 'CUSTOMER COPY', 0);
+
+        $cutY = $pdf->GetY() + 5;
+        $pdf->SetLineStyle(['width' => 0.2, 'dash' => '2,2', 'color' => [140, 140, 140]]);
+        $pdf->Line(10, $cutY, 200, $cutY);
+        $pdf->SetLineStyle(['width' => 0.2, 'dash' => 0, 'color' => [0, 0, 0]]);
+        $pdf->SetFont('helvetica', '', 7);
+        $pdf->SetTextColor(140, 140, 140);
+        $pdf->SetXY(10, $cutY - 3);
+        $pdf->Cell(190, 4, '- - - - - - - - - - - - - - - - - -  C U T   H E R E  - - - - - - - - - - - - - - - - - -', 0, 0, 'C');
+        $pdf->SetTextColor(0, 0, 0);
+
+        $this->renderDcPage($pdf, $dc, 'COMPANY COPY', $cutY + 5);
+
+        return $pdf->Output('dc_' . $dc->dc_no . '.pdf', 'I');
+    }
+
+    private function renderDcPage(\TCPDF $pdf, DeliveryChallan $dc, string $copyLabel, float $yOffset = 0): void
+    {
+        $logoPath = public_path('assets/img/logo.png');
+        if (file_exists($logoPath)) {
+            $pdf->Image($logoPath, 12, $yOffset + 8, 25);
+        }
+
+        $pdf->SetFont('helvetica', 'B', 16);
+        $pdf->SetXY(40, $yOffset + 10);
+        $pdf->Cell(0, 7, 'M M LOGISTICS', 0, 1, 'L');
+        $pdf->SetFont('helvetica', '', 9);
+        $pdf->SetXY(40, $yOffset + 17);
+        $pdf->Cell(0, 5, 'Room No 301, 303, 305, 307, 3rd Floor, Custom Trade Tower,', 0, 1, 'L');
+        $pdf->SetXY(40, $yOffset + 22);
+        $pdf->Cell(0, 5, 'KPT Stadium, Kharadar, Karachi', 0, 1, 'L');
+
+        $pdf->SetFont('helvetica', 'B', 14);
+        $pdf->SetXY(140, $yOffset + 10);
+        $pdf->Cell(60, 6, 'DELIVERY CHALLAN', 0, 1, 'R');
+        $pdf->SetFont('helvetica', 'B', 10);
+        $pdf->SetXY(140, $yOffset + 17);
+        $pdf->Cell(60, 6, $copyLabel, 0, 1, 'R');
+
+        // yOffset applied only up to here — Line() doesn't move the cursor,
+        // but everything below (writeHTML tables, Ln(), the GetY()-based
+        // signature block) advances relative to whatever Y the cell calls
+        // above already left the cursor at, so it naturally stays offset
+        // without needing $yOffset added to every subsequent call.
+        $pdf->Line(10, $yOffset + 30, 200, $yOffset + 30);
+        $pdf->Ln(9);
+
+        $pdf->SetFont('helvetica', '', 10);
+        $vehicleLine = $dc->vehicleLine;
+        $job = $vehicleLine?->dailyJob;
+
+        $headHtml = '
+        <table cellpadding="3" cellspacing="0" width="100%">
+            <tr>
+                <td width="50%"><b>DC No.:</b> ' . e($dc->dc_no) . '</td>
+                <td width="50%" align="right"><b>Date:</b> ' . $dc->dc_date->format('d-m-Y') . '</td>
+            </tr>
+        </table>';
+        $pdf->writeHTML($headHtml, true, false, false, false, '');
+
+        $detailsHtml = '
+        <table border="0.3" cellpadding="4" cellspacing="0" width="100%" style="font-size:10px;">
+            <tr>
+                <td width="15%"><b>Consignee</b></td>
+                <td width="35%">' . e($dc->customer->name ?? '') . '</td>
+                <td width="15%"><b>Clearing Agent</b></td>
+                <td width="35%">' . e($dc->clearing_agent ?? '') . '</td>
+            </tr>
+            <tr>
+                <td><b>Port</b></td>
+                <td>' . e($dc->port->name ?? '') . '</td>
+                <td><b>Job No.</b></td>
+                <td>' . e($job->job_no ?? '— not linked to a job yet —') . '</td>
+            </tr>
+            <tr>
+                <td><b>Unit</b></td>
+                <td>' . e($dc->unit ?? '') . '</td>
+                <td><b>BL #</b></td>
+                <td>' . e($dc->bl_no ?? '') . '</td>
+            </tr>
+            <tr>
+                <td><b>Container No.</b></td>
+                <td colspan="3">' . e($dc->container_no ?? '') . '</td>
+            </tr>
+        </table>';
+        $pdf->writeHTML($detailsHtml, true, false, true, false, '');
+        $pdf->Ln(3);
+
+        $itemHtml = '
+        <table border="0.3" cellpadding="4" cellspacing="0" width="100%" style="font-size:10px;">
+            <tr style="background-color:#f5f5f5; font-weight:bold;">
+                <th width="20%">Quantity</th>
+                <th width="55%">Item Description</th>
+                <th width="25%">Truck No.</th>
+            </tr>
+            <tr>
+                <td>' . e($dc->quantity ?? '') . '</td>
+                <td>' . e($dc->item_description ?? '') . '</td>
+                <td>' . e($dc->truck_no ?? ($vehicleLine?->vehicle?->vehicle_no ?? '')) . '</td>
+            </tr>
+        </table>';
+        $pdf->writeHTML($itemHtml, true, false, true, false, '');
+        $pdf->Ln(3);
+
+        $pdf->SetFont('helvetica', 'B', 10);
+        $pdf->Cell(0, 6, 'FOR COMPANY USE ONLY', 0, 1, 'L');
+        $gateHtml = '
+        <table border="0.3" cellpadding="6" cellspacing="0" width="100%" style="font-size:10px;">
+            <tr>
+                <td width="50%"><b>Gate In:</b> ________________________</td>
+                <td width="50%"><b>Gate Out:</b> ________________________</td>
+            </tr>
+        </table>';
+        $pdf->writeHTML($gateHtml, true, false, true, false, '');
+
+        $pdf->Ln(11);
+        $yPos = $pdf->GetY();
+        $lineWidth = 50;
+        $pdf->Line(20, $yPos, 20 + $lineWidth, $yPos);
+        $pdf->Line(130, $yPos, 130 + $lineWidth, $yPos);
+        $pdf->SetXY(20, $yPos + 2);
+        $pdf->SetFont('helvetica', '', 9);
+        $pdf->Cell($lineWidth, 6, 'Driver / Received By', 0, 0, 'C');
+        $pdf->SetXY(130, $yPos + 2);
+        $pdf->Cell($lineWidth, 6, 'WITH COMPANY STAMP', 0, 0, 'C');
+
+        // The two Cell() calls above pass ln=0 (cursor doesn't advance to a
+        // new line), so GetY() would otherwise still report $yPos+2 — short
+        // of where this signature row actually ends visually. print()
+        // relies on GetY() right after this call to know where to place the
+        // CUT HERE divider / the next copy, so it must reflect the true
+        // bottom of this content or the divider ends up overlapping this
+        // signature line.
+        $pdf->SetY($yPos + 2 + 6);
     }
 }
