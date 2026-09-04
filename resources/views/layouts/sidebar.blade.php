@@ -90,6 +90,7 @@
 
           {{-- Operations --}}
           @if(
+            auth()->user()->can('delivery_challans.index') ||
             auth()->user()->can('daily_jobs.index') ||
             auth()->user()->can('bills.index') ||
             auth()->user()->can('invoices.index') ||
@@ -98,6 +99,9 @@
           <li class="nav-parent">
             <a class="nav-link" href="#"><i class="fa fa-route"></i> <span>Operations</span></a>
             <ul class="nav nav-children">
+              @can('delivery_challans.index')
+              <li><a class="nav-link" href="{{ route('delivery-challans.index') }}">Delivery Challans</a></li>
+              @endcan
               @can('daily_jobs.index')
               <li><a class="nav-link" href="{{ route('daily-jobs.index') }}">Daily Jobs</a></li>
               @endcan
