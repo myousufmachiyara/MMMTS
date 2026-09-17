@@ -66,7 +66,7 @@
                     <input type="date" name="to_date"
                            value="{{ request('to_date', $to) }}" class="form-control" required>
                 </div>
-                <div class="col-md-4">
+                <div class="col-md-3">
                     <select name="account_id" data-plugin-selecttwo class="form-control select2-js">
                         <option value="">-- All Accounts --</option>
                         @foreach ($chartOfAccounts as $coa)
@@ -77,16 +77,25 @@
                         @endforeach
                     </select>
                 </div>
-                <div class="col-md-2">
-                    <button class="btn btn-primary w-100" type="submit">
-                        <i class="fas fa-filter"></i> Filter
+                <div class="col-md-1">
+                    <button class="btn btn-primary w-100" type="submit" title="Filter">
+                        <i class="fas fa-filter"></i>
                     </button>
                 </div>
                 <div class="col-md-2">
-                    <button type="button" class="btn btn-danger w-100"
-                            onclick="exportReportPDF('{{ $key }}', '{{ $label }}')">
-                        <i class="fas fa-file-pdf"></i> Export PDF
-                    </button>
+                    {{-- Item 12 — real server-generated PDF export of this tab, using
+                         the same period/account filters already applied above (not a
+                         client-side print-the-table trick). --}}
+                    <a class="btn btn-danger w-100"
+                       href="{{ route('reports.accounts.exportPdf', ['report' => $key, 'from_date' => $from, 'to_date' => $to, 'account_id' => request('account_id')]) }}">
+                        <i class="fas fa-file-pdf"></i> PDF
+                    </a>
+                </div>
+                <div class="col-md-2">
+                    <a class="btn btn-success w-100"
+                       href="{{ route('reports.accounts.exportExcel', ['report' => $key, 'from_date' => $from, 'to_date' => $to, 'account_id' => request('account_id')]) }}">
+                        <i class="fas fa-file-excel"></i> Excel
+                    </a>
                 </div>
             </form>
 
@@ -213,7 +222,6 @@
                             {{-- row: [date, dr_account, cr_account, narration, dr, cr, balance] --}}
                             <td>{{ $row[0] }}</td>
                             <td>{{ $row[1] }}</td>
-                                                        <td>{{ $row[1] }}</td>
                             <td>{{ $row[2] }}</td>
                             <td class="narration">{{ $row[3] ?? '' }}</td>
                             <td class="text-end">{{ $row[4] ?? '' }}</td>
@@ -370,42 +378,10 @@ function loadVoucherIntoModal(id) {
         .catch(() => alert('Could not load voucher data.'));
 }
 
-// ── PDF export ──────────────────────────────────────────────────
-function exportReportPDF(reportKey, reportLabel) {
-    const from      = document.querySelector('#' + reportKey + ' input[name="from_date"]')?.value || '{{ $from }}';
-    const to        = document.querySelector('#' + reportKey + ' input[name="to_date"]')?.value   || '{{ $to }}';
-    const accountEl = document.querySelector('#' + reportKey + ' select[name="account_id"]');
-    const accountName = accountEl ? accountEl.options[accountEl.selectedIndex]?.text : 'All Accounts';
-
-    const tableEl = document.getElementById('report-table-' + reportKey);
-    if (!tableEl) return;
-
-    const clone = tableEl.cloneNode(true);
-    clone.querySelectorAll('.no-print').forEach(e => e.remove());
-    clone.querySelectorAll('.badge').forEach(b => b.replaceWith(document.createTextNode(b.textContent.trim())));
-    clone.querySelectorAll('a').forEach(a => a.replaceWith(document.createTextNode(a.textContent.trim())));
-
-    const html = '<!DOCTYPE html><html><head><meta charset="utf-8"><title>' + reportLabel + '</title>'
-        + '<style>body{font-family:Arial,sans-serif;font-size:11px;margin:20px}'
-        + 'h2{font-size:14px;margin-bottom:2px}p{font-size:10px;color:#666;margin:0 0 10px}'
-        + 'table{width:100%;border-collapse:collapse}'
-        + 'th{background:#1a1a2e;color:#fff;padding:5px 7px;text-align:left}'
-        + 'td{padding:4px 7px;border-bottom:0.5px solid #ddd}'
-        + 'tr:nth-child(even) td{background:#f9f9f9}'
-        + 'tfoot td{background:#e9ecef;font-weight:bold}'
-        + '.text-end{text-align:right}.fw-bold{font-weight:bold}'
-        + '.table-active td{background:#dde;font-weight:bold}'
-        + '.narration{color:#888;font-style:italic}</style></head><body>'
-        + '<h2>' + reportLabel + '</h2>'
-        + '<p>Period: ' + from + ' to ' + to + ' &nbsp;|&nbsp; Account: ' + accountName + '</p>'
-        + clone.innerHTML
-        + '<script>window.onload=function(){window.print();}<\/script>'
-        + '</body></html>';
-
-    const win = window.open('', '_blank', 'width=900,height=700');
-    win.document.write(html);
-    win.document.close();
-}
+// Item 12 — the old client-side "print the table" export has been
+// replaced by real server-generated PDF/Excel downloads (see the PDF/Excel
+// links in the filter form above), so the exportReportPDF() function that
+// used to live here has been removed.
 
 // ── Tab activation from URL ─────────────────────────────────────
 document.addEventListener('DOMContentLoaded', function () {

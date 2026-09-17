@@ -15,6 +15,8 @@
             'vendor_wise'     => 'Vendor Wise (Party-to-Party)',
             'route_wise'      => 'Route Wise',
             'customer_routes' => 'Customer × Route Usage',
+            'company_share'   => 'Company % Share',
+            'vehicle_pl'      => 'Vehicle P&L',
         ] as $key => $label)
             <li class="nav-item">
                 <a class="nav-link {{ $loop->first ? 'active' : '' }}"
@@ -44,6 +46,12 @@
         {{-- Vehicle Wise --}}
         <div class="tab-pane fade show active" id="vehicle_wise" role="tabpanel">
             <p class="text-muted small">For a job with more than one vehicle, its total amount is split evenly across those vehicles below (charges are recorded once per job, not per vehicle).</p>
+            {{-- Item 12 — real server-generated PDF/Excel export of this tab, using the
+                 same From/To filter already applied above. --}}
+            <div class="mb-2 no-print">
+                <a class="btn btn-danger btn-sm" href="{{ route('reports.fleet.exportPdf', ['report' => 'vehicle_wise', 'from_date' => $from, 'to_date' => $to]) }}"><i class="fas fa-file-pdf"></i> PDF</a>
+                <a class="btn btn-success btn-sm" href="{{ route('reports.fleet.exportExcel', ['report' => 'vehicle_wise', 'from_date' => $from, 'to_date' => $to]) }}"><i class="fas fa-file-excel"></i> Excel</a>
+            </div>
             <div class="table-responsive">
                 <table class="table table-bordered table-striped table-sm">
                     <thead class="table-dark">
@@ -74,6 +82,10 @@
 
         {{-- Customer Wise --}}
         <div class="tab-pane fade" id="customer_wise" role="tabpanel">
+            <div class="mb-2 no-print">
+                <a class="btn btn-danger btn-sm" href="{{ route('reports.fleet.exportPdf', ['report' => 'customer_wise', 'from_date' => $from, 'to_date' => $to]) }}"><i class="fas fa-file-pdf"></i> PDF</a>
+                <a class="btn btn-success btn-sm" href="{{ route('reports.fleet.exportExcel', ['report' => 'customer_wise', 'from_date' => $from, 'to_date' => $to]) }}"><i class="fas fa-file-excel"></i> Excel</a>
+            </div>
             <div class="table-responsive">
                 <table class="table table-bordered table-striped table-sm">
                     <thead class="table-dark">
@@ -108,6 +120,10 @@
 
         {{-- Vendor Wise --}}
         <div class="tab-pane fade" id="vendor_wise" role="tabpanel">
+            <div class="mb-2 no-print">
+                <a class="btn btn-danger btn-sm" href="{{ route('reports.fleet.exportPdf', ['report' => 'vendor_wise', 'from_date' => $from, 'to_date' => $to]) }}"><i class="fas fa-file-pdf"></i> PDF</a>
+                <a class="btn btn-success btn-sm" href="{{ route('reports.fleet.exportExcel', ['report' => 'vendor_wise', 'from_date' => $from, 'to_date' => $to]) }}"><i class="fas fa-file-excel"></i> Excel</a>
+            </div>
             <div class="table-responsive">
                 <table class="table table-bordered table-striped table-sm">
                     <thead class="table-dark">
@@ -144,6 +160,10 @@
 
         {{-- Route Wise --}}
         <div class="tab-pane fade" id="route_wise" role="tabpanel">
+            <div class="mb-2 no-print">
+                <a class="btn btn-danger btn-sm" href="{{ route('reports.fleet.exportPdf', ['report' => 'route_wise', 'from_date' => $from, 'to_date' => $to]) }}"><i class="fas fa-file-pdf"></i> PDF</a>
+                <a class="btn btn-success btn-sm" href="{{ route('reports.fleet.exportExcel', ['report' => 'route_wise', 'from_date' => $from, 'to_date' => $to]) }}"><i class="fas fa-file-excel"></i> Excel</a>
+            </div>
             <div class="table-responsive">
                 <table class="table table-bordered table-striped table-sm">
                     <thead class="table-dark">
@@ -174,6 +194,10 @@
 
         {{-- Customer x Route Usage --}}
         <div class="tab-pane fade" id="customer_routes" role="tabpanel">
+            <div class="mb-2 no-print">
+                <a class="btn btn-danger btn-sm" href="{{ route('reports.fleet.exportPdf', ['report' => 'customer_routes', 'from_date' => $from, 'to_date' => $to]) }}"><i class="fas fa-file-pdf"></i> PDF</a>
+                <a class="btn btn-success btn-sm" href="{{ route('reports.fleet.exportExcel', ['report' => 'customer_routes', 'from_date' => $from, 'to_date' => $to]) }}"><i class="fas fa-file-excel"></i> Excel</a>
+            </div>
             @forelse($reports['customer_routes'] as $group)
                 <h6 class="mt-3">{{ $group['customer'] }}</h6>
                 <div class="table-responsive mb-3">
@@ -199,6 +223,74 @@
             @empty
                 <p class="text-muted">No direct jobs in this period.</p>
             @endforelse
+        </div>
+
+        {{-- Company % Share (Item 15a) --}}
+        <div class="tab-pane fade" id="company_share" role="tabpanel">
+            <p class="text-muted small">A vehicle's (evenly-split) revenue is split evenly again across every company it's linked to. A vehicle linked to no company falls under "Unassigned" so the percentages below always total 100%.</p>
+            <div class="mb-2 no-print">
+                <a class="btn btn-danger btn-sm" href="{{ route('reports.fleet.exportPdf', ['report' => 'company_share', 'from_date' => $from, 'to_date' => $to]) }}"><i class="fas fa-file-pdf"></i> PDF</a>
+                <a class="btn btn-success btn-sm" href="{{ route('reports.fleet.exportExcel', ['report' => 'company_share', 'from_date' => $from, 'to_date' => $to]) }}"><i class="fas fa-file-excel"></i> Excel</a>
+            </div>
+            <div class="table-responsive">
+                <table class="table table-bordered table-striped table-sm">
+                    <thead class="table-dark">
+                        <tr>
+                            <th>Company</th>
+                            <th class="text-end">Revenue</th>
+                            <th class="text-end">% of Total</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @forelse($reports['company_share'] as $row)
+                            <tr>
+                                <td>{{ $row['company'] }}</td>
+                                <td class="text-end">{{ number_format($row['amount'], 2) }}</td>
+                                <td class="text-end">{{ number_format($row['percent'], 2) }}%</td>
+                            </tr>
+                        @empty
+                            <tr><td colspan="3" class="text-center text-muted">No direct jobs in this period.</td></tr>
+                        @endforelse
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        {{-- Vehicle P&L (Item 15b) --}}
+        <div class="tab-pane fade" id="vehicle_pl" role="tabpanel">
+            <p class="text-muted small">This app doesn't track vehicle-level costs (no fuel, driver wage, or maintenance records exist), so Cost and Profit show as N/A rather than assuming zero cost. This is a revenue-per-vehicle view, not a true P&amp;L, until cost tracking is added.</p>
+            <div class="mb-2 no-print">
+                <a class="btn btn-danger btn-sm" href="{{ route('reports.fleet.exportPdf', ['report' => 'vehicle_pl', 'from_date' => $from, 'to_date' => $to]) }}"><i class="fas fa-file-pdf"></i> PDF</a>
+                <a class="btn btn-success btn-sm" href="{{ route('reports.fleet.exportExcel', ['report' => 'vehicle_pl', 'from_date' => $from, 'to_date' => $to]) }}"><i class="fas fa-file-excel"></i> Excel</a>
+            </div>
+            <div class="table-responsive">
+                <table class="table table-bordered table-striped table-sm">
+                    <thead class="table-dark">
+                        <tr>
+                            <th>Vehicle</th>
+                            <th>Vehicle No.</th>
+                            <th class="text-center">Trips</th>
+                            <th class="text-end">Revenue</th>
+                            <th class="text-end">Cost</th>
+                            <th class="text-end">Profit</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @forelse($reports['vehicle_pl'] as $row)
+                            <tr>
+                                <td>{{ $row['vehicle'] }}</td>
+                                <td>{{ $row['vehicle_no'] }}</td>
+                                <td class="text-center">{{ $row['trip_count'] }}</td>
+                                <td class="text-end">{{ number_format($row['revenue'], 2) }}</td>
+                                <td class="text-end text-muted">{{ $row['cost'] ?? 'N/A' }}</td>
+                                <td class="text-end text-muted">{{ $row['profit'] ?? 'N/A' }}</td>
+                            </tr>
+                        @empty
+                            <tr><td colspan="6" class="text-center text-muted">No direct jobs in this period.</td></tr>
+                        @endforelse
+                    </tbody>
+                </table>
+            </div>
         </div>
 
     </div>

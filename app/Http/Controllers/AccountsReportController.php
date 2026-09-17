@@ -3,9 +3,12 @@
 namespace App\Http\Controllers;
 
 use Illuminate\Http\Request;
+use App\Exports\GenericTableExport;
 use App\Models\ChartOfAccounts;
 use App\Models\Voucher;
 use Carbon\Carbon;
+use Illuminate\Support\Str;
+use Maatwebsite\Excel\Facades\Excel;
 use DB;
 
 class AccountsReportController extends Controller
@@ -64,6 +67,185 @@ class AccountsReportController extends Controller
     }
 
     // ─────────────────────────────────────────────────────────────
+    // ITEM 12 — PDF & Excel export
+    //
+    // Both actions export exactly one report tab (the one currently on
+    // screen, identified by ?report=<key>) rather than all 12 at once, and
+    // exercise the SAME period/account filters already applied on screen
+    // (?from_date, ?to_date, ?account_id) — so what's exported always
+    // matches what's currently displayed.
+    // ─────────────────────────────────────────────────────────────
+
+    // Column headings for each report tab, in the same order the tab's own
+    // table renders them (see accounts_reports.blade.php). Used to both
+    // build the exported table AND to trim each report's row arrays down
+    // to just the exportable columns — general_ledger/party_ledger rows
+    // carry one extra trailing element (voucher_type, see generalLedger()'s
+    // FIX 2) that's for the blade's print-link only and isn't a column.
+    private function reportHeaders(): array
+    {
+        return [
+            'general_ledger'   => ['Date', 'Account', 'Voucher / Ref', 'Narration', 'Debit', 'Credit', 'Balance'],
+            'trial_balance'    => ['Account', 'Type', 'Debit', 'Credit'],
+            'profit_loss'      => ['Particulars', 'Amount'],
+            'balance_sheet'    => ['Assets', 'Amount', 'Liabilities & Equity', 'Amount'],
+            'party_ledger'     => ['Date', 'Party', 'Voucher / Ref', 'Narration', 'Debit', 'Credit', 'Balance'],
+            'receivables'      => ['Account', 'Total Receivable'],
+            'payables'         => ['Account', 'Total Payable'],
+            'cash_book'        => ['Date', 'Debit Account', 'Credit Account', 'Narration', 'Debit', 'Credit', 'Balance'],
+            'bank_book'        => ['Date', 'Debit Account', 'Credit Account', 'Narration', 'Debit', 'Credit', 'Balance'],
+            'journal_book'     => ['Date', 'Voucher', 'Debit Account', 'Credit Account', 'Narration', 'Amount'],
+            'expense_analysis' => ['Expense Head', 'Amount'],
+            'cash_flow'        => ['Activity', 'Amount'],
+        ];
+    }
+
+    private function reportLabels(): array
+    {
+        return [
+            'general_ledger'   => 'General Ledger',
+            'trial_balance'    => 'Trial Balance',
+            'profit_loss'      => 'Profit & Loss',
+            'balance_sheet'    => 'Balance Sheet',
+            'party_ledger'     => 'Party Ledger',
+            'receivables'      => 'Receivables',
+            'payables'         => 'Payables',
+            'cash_book'        => 'Cash Book',
+            'bank_book'        => 'Bank Book',
+            'journal_book'     => 'Journal - Day Book',
+            'expense_analysis' => 'Expense Analysis',
+            'cash_flow'        => 'Cash Flow',
+        ];
+    }
+
+    // Builds just the ONE report an export was requested for, rather than
+    // all 12 (unlike accounts() above, which builds every tab up front for
+    // the tabbed page).
+    private function buildReport(string $key, $accountId, $from, $to)
+    {
+        return match ($key) {
+            'general_ledger'   => $this->generalLedger($accountId, $from, $to),
+            'trial_balance'    => $this->trialBalance($from, $to),
+            'profit_loss'      => $this->profitLoss($from, $to),
+            'balance_sheet'    => $this->balanceSheet($from, $to),
+            'party_ledger'     => $this->partyLedger($from, $to, $accountId),
+            'receivables'      => $this->receivables($from, $to),
+            'payables'         => $this->payables($from, $to),
+            'cash_book'        => $this->cashBook($from, $to),
+            'bank_book'        => $this->bankBook($from, $to),
+            'journal_book'     => $this->journalBook($from, $to),
+            'expense_analysis' => $this->expenseAnalysis($from, $to),
+            'cash_flow'        => $this->cashFlow($from, $to),
+            default            => null,
+        };
+    }
+
+    private function prepareExport(Request $request): array
+    {
+        $headers = $this->reportHeaders();
+        $key     = $request->get('report');
+
+        if (!$key || !isset($headers[$key])) {
+            abort(404, 'Unknown report.');
+        }
+
+        $from      = $request->from_date ?? Carbon::now()->startOfMonth()->toDateString();
+        $to        = $request->to_date   ?? Carbon::now()->endOfMonth()->toDateString();
+        $accountId = $request->account_id;
+
+        $data = $this->buildReport($key, $accountId, $from, $to);
+        $head = $headers[$key];
+
+        $rows = collect($data)->map(function ($row) use ($head) {
+            return array_slice(array_values((array) $row), 0, count($head));
+        })->values()->all();
+
+        return [
+            'label'   => $this->reportLabels()[$key],
+            'headers' => $head,
+            'rows'    => $rows,
+            'from'    => $from,
+            'to'      => $to,
+        ];
+    }
+
+    public function exportExcel(Request $request)
+    {
+        $export = $this->prepareExport($request);
+
+        $filename = Str::slug($export['label']) . '_' . now()->format('Ymd_His') . '.xlsx';
+
+        return Excel::download(
+            new GenericTableExport($export['headers'], $export['rows'], $export['label']),
+            $filename
+        );
+    }
+
+    public function exportPdf(Request $request)
+    {
+        $export = $this->prepareExport($request);
+
+        $pdfContent = $this->renderReportPdf($export['label'], $export['from'], $export['to'], $export['headers'], $export['rows']);
+
+        $filename = Str::slug($export['label']) . '_' . now()->format('Ymd_His') . '.pdf';
+
+        return response($pdfContent, 200, [
+            'Content-Type'        => 'application/pdf',
+            'Content-Disposition' => 'inline; filename="' . $filename . '"',
+        ]);
+    }
+
+    // Shared PDF table renderer — landscape (reports commonly run 6-7
+    // columns wide, e.g. General Ledger/Cash Book, which don't fit
+    // comfortably in portrait) — styled the same as every other PDF in
+    // this app (writeHTML table, #f5f5f5 header row, 0.3 border).
+    private function renderReportPdf(string $label, string $from, string $to, array $headers, array $rows): string
+    {
+        $pdf = new \TCPDF('L', 'mm', 'A4');
+        $pdf->setPrintHeader(false);
+        $pdf->setPrintFooter(false);
+        $pdf->SetCreator('MMMTS');
+        $pdf->SetAuthor('Your Company');
+        $pdf->SetTitle($label);
+        $pdf->SetMargins(10, 10, 10);
+        $pdf->AddPage();
+        $pdf->setCellPadding(1.5);
+
+        $pdf->SetFont('helvetica', 'B', 14);
+        $pdf->Cell(0, 8, $label, 0, 1, 'L');
+        $pdf->SetFont('helvetica', '', 9);
+        $pdf->Cell(0, 5, 'Period: ' . Carbon::parse($from)->format('d-m-Y') . ' to ' . Carbon::parse($to)->format('d-m-Y'), 0, 1, 'L');
+        $pdf->Ln(3);
+
+        $colWidth = round(100 / max(count($headers), 1), 2);
+
+        $html = '<table border="0.3" cellpadding="4" cellspacing="0" width="100%" style="font-size:9px;">
+            <tr style="background-color:#f5f5f5;font-weight:bold;">';
+        foreach ($headers as $h) {
+            $html .= '<th width="' . $colWidth . '%">' . e($h) . '</th>';
+        }
+        $html .= '</tr>';
+
+        if (empty($rows)) {
+            $html .= '<tr><td colspan="' . count($headers) . '" align="center">No data found for the selected period.</td></tr>';
+        }
+
+        foreach ($rows as $row) {
+            $html .= '<tr>';
+            foreach ($row as $col) {
+                $isNum = $col !== '' && $col !== null && is_numeric(str_replace(',', '', (string) $col));
+                $html .= '<td align="' . ($isNum ? 'right' : 'left') . '">' . e((string) $col) . '</td>';
+            }
+            $html .= '</tr>';
+        }
+        $html .= '</table>';
+
+        $pdf->writeHTML($html, true, false, true, false, '');
+
+        return $pdf->Output($label . '.pdf', 'S');
+    }
+
+    // ─────────────────────────────────────────────────────────────
     // HELPER — format number
     // ─────────────────────────────────────────────────────────────
     private function fmt($v): string
@@ -78,8 +260,7 @@ class AccountsReportController extends Controller
     {
         return in_array($accountType ?? '', self::DEBIT_NATURE);
     }
-
-    // ─────────────────────────────────────────────────────────────
+        // ─────────────────────────────────────────────────────────────
     // CORE BALANCE CALCULATOR
     //
     // Two modes depending on what you pass:
@@ -258,7 +439,8 @@ class AccountsReportController extends Controller
 
         return $rows->concat($movements);
     }
-        // ─────────────────────────────────────────────────────────────
+
+    // ─────────────────────────────────────────────────────────────
     // PROFIT & LOSS
     // Period-only (Mode B) — revenue, COGS, expenses
     // ─────────────────────────────────────────────────────────────

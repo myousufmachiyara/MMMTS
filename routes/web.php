@@ -136,6 +136,12 @@ Route::middleware(['auth'])->group(function () {
     // Reports (readonly)
     Route::prefix('reports')->name('reports.')->group(function () {
         Route::get('accounts', [AccountsReportController::class, 'accounts'])->middleware('check.permission:reports.accounts')->name('accounts');
+        // Item 12 — PDF & Excel export, one report tab at a time (?report=<key>).
+        Route::get('accounts/export-pdf', [AccountsReportController::class, 'exportPdf'])->middleware('check.permission:reports.accounts')->name('accounts.exportPdf');
+        Route::get('accounts/export-excel', [AccountsReportController::class, 'exportExcel'])->middleware('check.permission:reports.accounts')->name('accounts.exportExcel');
+
         Route::get('fleet', [FleetReportController::class, 'index'])->middleware('check.permission:reports.fleet')->name('fleet');
+        Route::get('fleet/export-pdf', [FleetReportController::class, 'exportPdf'])->middleware('check.permission:reports.fleet')->name('fleet.exportPdf');
+        Route::get('fleet/export-excel', [FleetReportController::class, 'exportExcel'])->middleware('check.permission:reports.fleet')->name('fleet.exportExcel');
     });
 });
