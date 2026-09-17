@@ -43,6 +43,7 @@
 
         {{-- Vehicle Wise --}}
         <div class="tab-pane fade show active" id="vehicle_wise" role="tabpanel">
+            <p class="text-muted small">For a job with more than one vehicle, its total amount is split evenly across those vehicles below (charges are recorded once per job, not per vehicle).</p>
             <div class="table-responsive">
                 <table class="table table-bordered table-striped table-sm">
                     <thead class="table-dark">

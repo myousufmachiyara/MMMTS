@@ -25,11 +25,11 @@ class DailyJobVehicle extends Model
         'labour_charges',
         'yard_charges',
         'kanta_charges',
-        'retention_first_day_charges',
-        'retention_next_day_rate',
-        'retention_extra_days',
-        'retention_night_rate',
-        'retention_total',
+        'detention_first_day_charges',
+        'detention_next_day_rate',
+        'detention_extra_days',
+        'detention_night_rate',
+        'detention_total',
         'extra_port_charges_total',
         'line_total',
         'delivery_challan_id',
@@ -96,15 +96,21 @@ class DailyJobVehicle extends Model
             ->get();
     }
 
-    // Retention (per-day) total = first day + (next-day rate * extra days)
-    //                             + (night rate * extra days — item 2's
-    //                             "night charges apply once day > 1" rule
-    //                             rides on extra_days already being >= 1).
-    public static function computeRetentionTotal($first, $nextRate, $extraDays, $nightRate): float
+    // Detention (per-day) total = first day + (next-day rate * extra days)
+    //                              + night charges.
+    //
+    // Item 7 fix: night charges only apply once extra_days is GREATER THAN
+    // 1 (i.e. 2 or more) — at exactly 1 extra day there is no "night" yet,
+    // so night_rate must contribute 0. The previous formula multiplied
+    // night_rate by extra_days unconditionally, so it incorrectly charged a
+    // night rate even at extra_days = 1.
+    public static function computeDetentionTotal($first, $nextRate, $extraDays, $nightRate): float
     {
         $extraDays = (int) $extraDays;
+        $nightCharges = $extraDays > 1 ? ((float) $nightRate * $extraDays) : 0.0;
+
         return round(
-            (float) $first + ((float) $nextRate * $extraDays) + ((float) $nightRate * $extraDays),
+            (float) $first + ((float) $nextRate * $extraDays) + $nightCharges,
             2
         );
     }

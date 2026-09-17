@@ -135,7 +135,7 @@ Route::middleware(['auth'])->group(function () {
 
     // Reports (readonly)
     Route::prefix('reports')->name('reports.')->group(function () {
-        Route::get('accounts', [AccountsReportController::class, 'accounts'])->name('accounts');
+        Route::get('accounts', [AccountsReportController::class, 'accounts'])->middleware('check.permission:reports.accounts')->name('accounts');
         Route::get('fleet', [FleetReportController::class, 'index'])->middleware('check.permission:reports.fleet')->name('fleet');
     });
 });

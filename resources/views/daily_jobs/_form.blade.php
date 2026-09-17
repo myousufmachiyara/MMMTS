@@ -38,7 +38,20 @@
         ];
     })->values() : [];
 
-    // Route/trip-plan/rate/retention fields are shared across the whole job
+    // Item 1 — the DC (if any) that spawned this job and hasn't been
+    // assigned to a vehicle-row yet (requires the controller to have eager
+    // loaded 'deliveryChallans.vehicleLine' — see DailyJobController::edit()
+    // and DailyJob::getPendingDeliveryChallanAttribute()). Used below to
+    // pre-select and auto-fill a brand-new vehicle row for a job that came
+    // from the Delivery Challan flow, rather than making the assistant hunt
+    // for its own DC in the dropdown.
+    $pendingDc = $isEdit ? $job->pending_delivery_challan : null;
+    $pendingDcData = $pendingDc ? [
+        'id'    => $pendingDc->id,
+        'label' => $pendingDc->dc_no . ' — ' . $pendingDc->dc_date->format('d-m-Y'),
+    ] : null;
+
+    // Route/trip-plan/rate/detention fields are shared across the whole job
     // and live on the job header — that's the source of truth going
     // forward. A job saved under the OLD per-vehicle-rates design (before
     // this change) never had its job-level fields populated, so as a
@@ -58,17 +71,17 @@
         'labour_charges'              => $job->labour_charges ?: ($firstLine->labour_charges ?? 0),
         'yard_charges'                => $job->yard_charges ?: ($firstLine->yard_charges ?? 0),
         'kanta_charges'               => $job->kanta_charges ?: ($firstLine->kanta_charges ?? 0),
-        'retention_first_day_charges' => $job->retention_first_day_charges ?: ($firstLine->retention_first_day_charges ?? 0),
-        'retention_next_day_rate'     => $job->retention_next_day_rate ?: ($firstLine->retention_next_day_rate ?? 0),
-        'retention_extra_days'        => $job->retention_extra_days ?: ($firstLine->retention_extra_days ?? 0),
-        'retention_night_rate'        => $job->retention_night_rate ?: ($firstLine->retention_night_rate ?? 0),
+        'detention_first_day_charges' => $job->detention_first_day_charges ?: ($firstLine->detention_first_day_charges ?? 0),
+        'detention_next_day_rate'     => $job->detention_next_day_rate ?: ($firstLine->detention_next_day_rate ?? 0),
+        'detention_extra_days'        => $job->detention_extra_days ?: ($firstLine->detention_extra_days ?? 0),
+        'detention_night_rate'        => $job->detention_night_rate ?: ($firstLine->detention_night_rate ?? 0),
         'extra_port'                  => $job->sharedExtraPortCharges->map(fn ($ep) => ['port_id' => $ep->port_id, 'charges' => $ep->charges])->values(),
     ] : [
         'route_id' => null, 'item_description' => null, 'trip_type' => 'one_way',
         'pickup_port_id' => null, 'destination_location_id' => null, 'dropoff_port_id' => null,
         'rent' => 0, 'labour_charges' => 0, 'yard_charges' => 0, 'kanta_charges' => 0,
-        'retention_first_day_charges' => 0, 'retention_next_day_rate' => 0,
-        'retention_extra_days' => 0, 'retention_night_rate' => 0,
+        'detention_first_day_charges' => 0, 'detention_next_day_rate' => 0,
+        'detention_extra_days' => 0, 'detention_night_rate' => 0,
         'extra_port' => [],
     ];
 @endphp
@@ -86,6 +99,16 @@
             @else
                 An admin still needs to fill in the rates before it can be billed.
             @endif
+        </div>
+    @endif
+
+    @if($pendingDc)
+        {{-- Item 1 — this job was auto-created when Delivery Challan
+             {{ $pendingDc->dc_no }} was created; it's already pre-selected
+             on the first vehicle row below. --}}
+        <div class="alert alert-info">
+            This job was created from Delivery Challan <strong>{{ $pendingDc->dc_no }}</strong> ({{ $pendingDc->dc_date->format('d-m-Y') }}).
+            It's pre-selected below — just pick the vehicle to assign it.
         </div>
     @endif
 
@@ -159,9 +182,12 @@
                             <th style="width:5%">#</th>
                             <th>Vehicle</th>
                             <th>Container #</th>
-                            @if($canFillRates)
-                                <th>Delivery Challan <small class="text-muted">(optional)</small></th>
-                            @endif
+                            {{-- Item 2 — DC linking is now a BASIC field
+                                 (like Vehicle/Container # to its left),
+                                 fillable by whoever fills in the job's
+                                 basic details, not gated behind fill_rates
+                                 any more. --}}
+                            <th>Delivery Challan <small class="text-muted">(optional)</small></th>
                             <th style="width:5%"></th>
                         </tr>
                     </thead>
@@ -197,6 +223,12 @@ var portsMaster = @json($portsMasterData);
 var customerLocations = @json($customerLocations);
 var existingVehicles = @json($existingVehiclesData);
 var sharedSeed = @json($sharedSeed);
+// Item 1/2 — this job's own id (for the "still show my own pending DC in
+// the dropdown" filter in unlinked()) and the DC that spawned it, if any
+// and not yet assigned to a vehicle.
+var currentJobId = @json($isEdit ? $job->id : null);
+var pendingDc = @json($pendingDcData);
+var dcShowBaseUrl = '{{ url('delivery-challans') }}';
 
 var vIndex = 0;
 var epIndex = 0;
@@ -229,7 +261,9 @@ function addExtraPortRow(row) {
 function toggleTripType() {
     var tripType = document.getElementById('trip_type');
     if (!tripType) return;
-    var wrap = document.getElementById('destination_wrap');
+    // Item 5 — One Way = Pickup Port + Destination only; Dropoff Port only
+    // applies once the vehicle is making a return leg (Two Way).
+    var wrap = document.getElementById('dropoff_wrap');
     if (wrap) wrap.style.display = tripType.value === 'two_way' ? '' : 'none';
 }
 
@@ -246,19 +280,23 @@ function filterDestinationOptions(customerId, selectedId) {
 function recalcTotal() {
     var num = function(id) { var el = document.getElementById(id); return el ? (parseFloat(el.value) || 0) : 0; };
 
-    var first = num('retention_first');
-    var nextRate = num('retention_next');
-    var extraDays = parseInt(document.getElementById('retention_days') ? document.getElementById('retention_days').value || 0 : 0, 10) || 0;
-    var nightRate = num('retention_night');
-    var retentionTotal = first + (nextRate * extraDays) + (nightRate * extraDays);
-    var retentionTotalEl = document.getElementById('retention_total_display');
-    if (retentionTotalEl) retentionTotalEl.value = fmt(retentionTotal);
+    var first = num('detention_first');
+    var nextRate = num('detention_next');
+    var extraDays = parseInt(document.getElementById('detention_days') ? document.getElementById('detention_days').value || 0 : 0, 10) || 0;
+    var nightRate = num('detention_night');
+    // Item 7 fix: night charges only apply once extra_days is GREATER THAN
+    // 1 (2 or more) — at exactly 1 extra day there is no "night" yet, so
+    // night_rate must contribute 0 rather than being charged unconditionally.
+    var nightCharges = extraDays > 1 ? (nightRate * extraDays) : 0;
+    var detentionTotal = first + (nextRate * extraDays) + nightCharges;
+    var detentionTotalEl = document.getElementById('detention_total_display');
+    if (detentionTotalEl) detentionTotalEl.value = fmt(detentionTotal);
 
     var extraPortTotal = 0;
     document.querySelectorAll('.extra-port-calc').forEach(function(el) { extraPortTotal += (parseFloat(el.value) || 0); });
 
     var rent = num('rent'), labour = num('labour'), yard = num('yard'), kanta = num('kanta');
-    var jobTotal = rent + labour + yard + kanta + retentionTotal + extraPortTotal;
+    var jobTotal = rent + labour + yard + kanta + detentionTotal + extraPortTotal;
     document.getElementById('job_total').value = fmt(jobTotal);
 }
 
@@ -282,13 +320,13 @@ function renderRateFields() {
             '<label>Pickup Port</label>' +
             '<select class="form-control select2-js" id="pickup_port_id" name="pickup_port_id">' + optionsHtml(portsMaster, row.pickup_port_id, 'Select Port') + '</select>' +
         '</div>' +
-        '<div class="col-lg-3 mb-2" id="destination_wrap" style="' + (isTwoWay ? '' : 'display:none;') + '">' +
+        '<div class="col-lg-3 mb-2" id="destination_wrap">' +
             '<label>Destination (Customer Location)</label>' +
             '<select class="form-control select2-js" id="destination_location_id" name="destination_location_id">' +
                 '<option value="">Select Customer Location</option>' +
             '</select>' +
         '</div>' +
-        '<div class="col-lg-3 mb-2">' +
+        '<div class="col-lg-3 mb-2" id="dropoff_wrap" style="' + (isTwoWay ? '' : 'display:none;') + '">' +
             '<label>Dropoff Port</label>' +
             '<select class="form-control select2-js" id="dropoff_port_id" name="dropoff_port_id">' + optionsHtml(portsMaster, row.dropoff_port_id, 'Select Port') + '</select>' +
         '</div>' +
@@ -300,12 +338,12 @@ function renderRateFields() {
         '<div class="col-lg-3 mb-2"><label>Weight Bridge (Kanta)</label><input type="number" step="any" class="form-control" id="kanta" name="kanta_charges" value="' + (row.kanta_charges || 0) + '" oninput="recalcTotal()"></div>' +
     '</div>' +
     '<div class="row form-group">' +
-        '<div class="col-lg-12"><label class="mb-0"><strong>Retention Charges</strong> <small class="text-muted">(a.k.a. Per Day Charges — night rate applies once the job runs past day 1)</small></label></div>' +
-        '<div class="col-lg-3 mb-2"><label>Day 1 Charges</label><input type="number" step="any" class="form-control" id="retention_first" name="retention_first_day_charges" value="' + (row.retention_first_day_charges || 0) + '" oninput="recalcTotal()"></div>' +
-        '<div class="col-lg-2 mb-2"><label>Next Day Rate</label><input type="number" step="any" class="form-control" id="retention_next" name="retention_next_day_rate" value="' + (row.retention_next_day_rate || 0) + '" oninput="recalcTotal()"></div>' +
-        '<div class="col-lg-2 mb-2"><label>Extra Days</label><input type="number" step="1" min="0" class="form-control" id="retention_days" name="retention_extra_days" value="' + (row.retention_extra_days || 0) + '" oninput="recalcTotal()"></div>' +
-        '<div class="col-lg-2 mb-2"><label>Night Rate</label><input type="number" step="any" class="form-control" id="retention_night" name="retention_night_rate" value="' + (row.retention_night_rate || 0) + '" oninput="recalcTotal()"></div>' +
-        '<div class="col-lg-3 mb-2"><label>Retention Total</label><input type="text" class="form-control" id="retention_total_display" readonly value="0.00"></div>' +
+        '<div class="col-lg-12"><label class="mb-0"><strong>Detention Charges</strong> <small class="text-muted">(night rate applies only once extra days is more than 1)</small></label></div>' +
+        '<div class="col-lg-3 mb-2"><label>Day 1 Charges</label><input type="number" step="any" class="form-control" id="detention_first" name="detention_first_day_charges" value="' + (row.detention_first_day_charges || 0) + '" oninput="recalcTotal()"></div>' +
+        '<div class="col-lg-2 mb-2"><label>Next Day Rate</label><input type="number" step="any" class="form-control" id="detention_next" name="detention_next_day_rate" value="' + (row.detention_next_day_rate || 0) + '" oninput="recalcTotal()"></div>' +
+        '<div class="col-lg-2 mb-2"><label>Extra Days</label><input type="number" step="1" min="0" class="form-control" id="detention_days" name="detention_extra_days" value="' + (row.detention_extra_days || 0) + '" oninput="recalcTotal()"></div>' +
+        '<div class="col-lg-2 mb-2"><label>Night Rate</label><input type="number" step="any" class="form-control" id="detention_night" name="detention_night_rate" value="' + (row.detention_night_rate || 0) + '" oninput="recalcTotal()"></div>' +
+        '<div class="col-lg-3 mb-2"><label>Detention Total</label><input type="text" class="form-control" id="detention_total_display" readonly value="0.00"></div>' +
     '</div>' +
     '<div class="mb-2">' +
         '<div class="d-flex justify-content-between align-items-center">' +
@@ -329,13 +367,19 @@ function renderRateFields() {
     recalcTotal();
 }
 
-// ── Delivery Challan link dropdown — only UNLINKED DCs offered (item 7) ──
+// ── Delivery Challan link dropdown — only DCs not yet assigned to a
+// vehicle are offered (item 7), which — since item 1 — now includes this
+// job's own pending DC (job_id is passed so unlinked() knows to still
+// offer it even though it already has a daily_job_id set). ──
 function refreshDcDropdown(vi, selectedId, selectedLabel) {
     var customerId = document.getElementById('customer_id').value;
     var $sel = $('#dc_select_' + vi);
     if (!$sel.length) return;
 
-    var url = '{{ route('delivery-challans.unlinked') }}' + (customerId ? ('?customer_id=' + customerId) : '');
+    var params = [];
+    if (customerId) params.push('customer_id=' + encodeURIComponent(customerId));
+    if (currentJobId) params.push('job_id=' + encodeURIComponent(currentJobId));
+    var url = '{{ route('delivery-challans.unlinked') }}' + (params.length ? ('?' + params.join('&')) : '');
     fetch(url, { headers: { 'Accept': 'application/json' } })
         .then(function(res) { return res.json(); })
         .then(function(list) {
@@ -358,6 +402,32 @@ function refreshDcDropdown(vi, selectedId, selectedLabel) {
         .catch(function() { /* leave dropdown as-is on failure */ });
 }
 
+// Item 2/3 — once a DC is selected (for a vehicle row), fetch the DC's own
+// details and auto-fill whatever the job form can actually use from it.
+// A DeliveryChallan only carries container_no and a single port_id (no
+// vehicle/route of its own), so those are the only two fields pulled in —
+// and only when the target field is still empty, so this never overwrites
+// something already typed in (e.g. re-selecting/adjusting a DC on a row
+// that already has its own container # shouldn't clobber it).
+function onDcSelected(vi, dcId) {
+    if (!dcId) return;
+    fetch(dcShowBaseUrl + '/' + dcId, { headers: { 'Accept': 'application/json' } })
+        .then(function(res) { return res.json(); })
+        .then(function(dc) {
+            var contEl = document.querySelector('[name="vehicles[' + vi + '][container_no]"]');
+            if (contEl && !contEl.value && dc.container_no) contEl.value = dc.container_no;
+
+            // Pickup Port is a shared, job-level rate field — only present
+            // in the DOM at all once renderRateFields() has run for a
+            // canFillRates user. Left alone for anyone else / once already set.
+            var pickupEl = document.getElementById('pickup_port_id');
+            if (pickupEl && !pickupEl.value && dc.port_id) {
+                $(pickupEl).val(dc.port_id).trigger('change');
+            }
+        })
+        .catch(function() { /* leave form as-is on failure */ });
+}
+
 function addVehicleRow(row) {
     row = row || {};
     var vi = vIndex++;
@@ -369,18 +439,23 @@ function addVehicleRow(row) {
         '<td class="row-number"></td>' +
         '<td><select class="form-control select2-js" name="vehicles[' + vi + '][vehicle_id]" required>' + optionsHtml(vehiclesMaster, row.vehicle_id, 'Select Vehicle') + '</select></td>' +
         '<td><input type="text" class="form-control" name="vehicles[' + vi + '][container_no]" value="' + (row.container_no || '') + '"></td>' +
-        (canFillRates ?
-            '<td><select class="form-control select2-js" id="dc_select_' + vi + '" name="vehicles[' + vi + '][delivery_challan_id]"><option value="">— Not linked —</option></select></td>'
-            : '') +
+        // Item 2 — no longer gated behind canFillRates; DC linking is a
+        // BASIC field now (see the "Delivery Challan" <th> above).
+        '<td><select class="form-control select2-js" id="dc_select_' + vi + '" name="vehicles[' + vi + '][delivery_challan_id]"><option value="">— Not linked —</option></select></td>' +
         '<td class="text-center"><button type="button" class="btn btn-link text-danger p-0 remove-vehicle-row"><i class="fas fa-trash-alt"></i></button></td>';
 
     document.getElementById('vehicleRows').appendChild(tr);
     initSelect2(tr);
     renumberVehicleRows();
 
-    if (canFillRates) {
-        refreshDcDropdown(vi, row.delivery_challan_id, row.delivery_challan_label);
-    }
+    $('#dc_select_' + vi).on('change', function() { onDcSelected(vi, this.value); });
+
+    refreshDcDropdown(vi, row.delivery_challan_id, row.delivery_challan_label);
+
+    // Item 2/3 — auto-fill from whichever DC this row already has (its own
+    // saved link, or the pendingDc seeded in below on a fresh row) as soon
+    // as the row exists, not just on a later manual re-selection.
+    if (row.delivery_challan_id) onDcSelected(vi, row.delivery_challan_id);
 }
 
 function renumberVehicleRows() {
@@ -420,7 +495,7 @@ document.getElementById('customer_id').addEventListener('change', function() {
     }
     document.querySelectorAll('#vehicleRows > tr').forEach(function(tr) {
         var vi = tr.id.replace('vehicleRow_', '');
-        if (canFillRates) refreshDcDropdown(vi, null, null);
+        refreshDcDropdown(vi, null, null);
     });
 });
 
@@ -435,7 +510,11 @@ $(document).ready(function() {
     if (existingVehicles.length) {
         existingVehicles.forEach(function(v) { addVehicleRow(v); });
     } else {
-        addVehicleRow();
+        // Item 1 — a job created via the Delivery Challan flow starts with
+        // zero vehicle-rows and its own DC still pending; seed the first
+        // (only) row with that DC already selected instead of leaving the
+        // assistant to go find it in the dropdown themselves.
+        addVehicleRow(pendingDc ? { delivery_challan_id: pendingDc.id, delivery_challan_label: pendingDc.label } : {});
     }
 });
 </script>

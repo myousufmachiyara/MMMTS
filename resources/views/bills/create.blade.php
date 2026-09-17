@@ -66,7 +66,7 @@
               <th>Date</th>
               <th>Vehicle(s)</th>
               <th>Route(s)</th>
-              <th class="text-end">Retention Charges</th>
+              <th class="text-end">Detention Charges</th>
               <th class="text-end">Other Charges</th>
               <th class="text-end">Job Total</th>
             </tr>
@@ -86,12 +86,23 @@
           <label>Bill Date <span class="text-danger">*</span></label>
           <input type="date" name="bill_date" id="bill_date" class="form-control" value="{{ date('Y-m-d') }}" required>
         </div>
+        <div class="col-lg-3 mb-2">
+          {{-- Item 8 — which "Our Company" is billing this customer; drives
+               the Bill print's letterhead (logo/address/contact). --}}
+          <label>Company <span class="text-danger">*</span></label>
+          <select class="form-control select2-js" name="company_id" required>
+            <option value="" disabled selected>Select Company</option>
+            @foreach($companies as $co)
+              <option value="{{ $co->id }}">{{ $co->name }}</option>
+            @endforeach
+          </select>
+        </div>
         <div class="col-lg-3 mb-2 d-flex align-items-end">
           <span class="text-muted">Containers/Jobs selected: <strong id="containerCount">0</strong></span>
         </div>
       </div>
       <table class="table table-borderless w-auto ms-auto mt-2 mb-0">
-        <tr><td class="text-end pe-3">Retention Charges Subtotal:</td><td class="text-end" id="sumRetention">0.00</td></tr>
+        <tr><td class="text-end pe-3">Detention Charges Subtotal:</td><td class="text-end" id="sumDetention">0.00</td></tr>
         <tr><td class="text-end pe-3">Other Charges Subtotal:</td><td class="text-end" id="sumOther">0.00</td></tr>
         <tr class="fw-bold"><td class="text-end pe-3">Total Bill Amount (Grand Total):</td><td class="text-end" id="sumTotal">0.00</td></tr>
       </table>
@@ -148,7 +159,7 @@ document.getElementById('getJobsBtn').addEventListener('click', function() {
                 '<td>' + j.date + '</td>' +
                 '<td>' + j.vehicle + '</td>' +
                 '<td>' + j.route + '</td>' +
-                '<td class="text-end" data-retention="' + j.retention_charges_total + '">' + fmt(j.retention_charges_total) + '</td>' +
+                '<td class="text-end" data-detention="' + j.detention_charges_total + '">' + fmt(j.detention_charges_total) + '</td>' +
                 '<td class="text-end" data-other="' + j.other_charges_total + '">' + fmt(j.other_charges_total) + '</td>' +
                 '<td class="text-end">' + fmt(j.job_total) + '</td>';
             tbody.appendChild(tr);
@@ -172,17 +183,17 @@ document.getElementById('jobsPickBody').addEventListener('change', function(e) {
 });
 
 function recalcTotals() {
-    var tripSum = 0, retentionSum = 0, otherSum = 0, count = 0;
+    var tripSum = 0, detentionSum = 0, otherSum = 0, count = 0;
     document.querySelectorAll('.job-check:checked').forEach(function(cb) {
         var tr = cb.closest('tr');
         tripSum += parseFloat(tr.dataset.trip || 0);
-        retentionSum += parseFloat(tr.querySelector('[data-retention]').dataset.retention);
+        detentionSum += parseFloat(tr.querySelector('[data-detention]').dataset.detention);
         otherSum += parseFloat(tr.querySelector('[data-other]').dataset.other);
         count++;
     });
     var total = tripSum + otherSum;
 
-    document.getElementById('sumRetention').textContent = fmt(retentionSum);
+    document.getElementById('sumDetention').textContent = fmt(detentionSum);
     document.getElementById('sumOther').textContent = fmt(otherSum);
     document.getElementById('sumTotal').textContent = fmt(total);
     document.getElementById('containerCount').textContent = count;

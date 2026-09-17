@@ -42,6 +42,12 @@ class Invoice extends Model
         return $this->belongsTo(ChartOfAccounts::class, 'customer_id', 'id');
     }
 
+    // Item 4 — who created this invoice, shown on the Invoice print.
+    public function creator()
+    {
+        return $this->belongsTo(User::class, 'created_by');
+    }
+
     public function bills()
     {
         return $this->hasMany(Bill::class);

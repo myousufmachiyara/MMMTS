@@ -6,10 +6,12 @@ use App\Models\Bill;
 use App\Models\ChartOfAccounts;
 use App\Models\DailyJob;
 use App\Models\Invoice;
+use App\Models\OurCompany;
 use App\Models\Voucher;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Storage;
 
 class BillController extends Controller
 {
@@ -34,7 +36,10 @@ class BillController extends Controller
     public function create()
     {
         $customers = ChartOfAccounts::customers()->orderBy('name')->get();
-        return view('bills.create', compact('customers'));
+        // Item 8 — which "Our Company" is billing this customer, picked here
+        // and carried onto the Bill print's letterhead.
+        $companies = OurCompany::where('is_active', true)->orderBy('name')->get();
+        return view('bills.create', compact('customers', 'companies'));
     }
 
     // AJAX: non-billed jobs for a customer within a date range
@@ -71,7 +76,7 @@ class BillController extends Controller
                     'route'                    => $isPty ? ($job->pty_destination ?? '—') : ($job->route->name ?? ($job->vehicles->pluck('route.name')->filter()->implode(', ') ?: '—')),
                     'vendor'                   => $isPty ? ($job->vendor->name ?? '—') : null,
                     'trip_plan_total'          => (float) $job->trip_plan_total,
-                    'retention_charges_total'  => (float) $job->retention_charges_total,
+                    'detention_charges_total'  => (float) $job->detention_charges_total,
                     'other_charges_total'      => (float) $job->other_charges_total,
                     'job_total'                => (float) $job->job_total,
                 ];
@@ -102,6 +107,10 @@ class BillController extends Controller
     {
         return [
             'customer_id' => 'required|exists:chart_of_accounts,id',
+            // Item 8 — required going forward so every new bill's print
+            // always has a real letterhead; older bills (company_id null)
+            // fall back to the old hard-coded one at print time.
+            'company_id'  => 'required|exists:our_companies,id',
             'from_date'   => 'required|date',
             'to_date'     => 'required|date|after_or_equal:from_date',
             'bill_date'   => 'required|date',
@@ -137,7 +146,7 @@ class BillController extends Controller
                 }
 
                 $tripPlanSubtotal      = round($jobs->sum('trip_plan_total'), 2);
-                $retentionChargesSubtotal = round($jobs->sum('retention_charges_total'), 2);
+                $detentionChargesSubtotal = round($jobs->sum('detention_charges_total'), 2);
                 $otherChargesSubtotal  = round($jobs->sum('other_charges_total'), 2);
                 // No tax at Bill level — tax (if any) is applied on the Invoice, on top
                 // of the combined grand totals of the bills it aggregates (item 13).
@@ -163,12 +172,13 @@ class BillController extends Controller
                 $bill = Bill::create([
                     'bill_no'                     => $billNo,
                     'customer_id'                 => $data['customer_id'],
+                    'company_id'                  => $data['company_id'],
                     'from_date'                   => $data['from_date'],
                     'to_date'                     => $data['to_date'],
                     'bill_date'                   => $data['bill_date'],
                     'trip_plan_subtotal'          => $tripPlanSubtotal,
                     'other_charges_subtotal'      => $otherChargesSubtotal,
-                    'retention_charges_subtotal'  => $retentionChargesSubtotal,
+                    'detention_charges_subtotal'  => $detentionChargesSubtotal,
                     'total_amount'                => $total,
                     'voucher_id'             => $voucher->id ?? null,
                     'remarks'                => $data['remarks'] ?? null,
@@ -252,7 +262,10 @@ class BillController extends Controller
     // Print — Bill PDF itemising the jobs it aggregates.
     public function print($id)
     {
-        $bill = Bill::with(['customer', 'jobs.vehicles.vehicle', 'jobs.route', 'jobs.vendor'])->findOrFail($id);
+        $bill = Bill::with([
+            'customer', 'company', 'creator',
+            'jobs.vehicles.vehicle', 'jobs.vehicles.deliveryChallan', 'jobs.route', 'jobs.vendor',
+        ])->findOrFail($id);
 
         $pdf = new \TCPDF();
         $pdf->setPrintHeader(false);
@@ -264,14 +277,42 @@ class BillController extends Controller
         $pdf->AddPage();
         $pdf->setCellPadding(1.5);
 
-        $pdf->SetFont('helvetica', 'B', 16);
-        $pdf->SetXY(10, 10);
-        $pdf->Cell(0, 7, 'M M LOGISTICS', 0, 1, 'L');
-        $pdf->SetFont('helvetica', '', 9);
-        $pdf->SetXY(10, 17);
-        $pdf->Cell(0, 5, 'Room No 301/307, 3rd Floor, Custom Trade Tower,', 0, 1, 'L');
-        $pdf->SetXY(10, 22);
-        $pdf->Cell(0, 5, 'KPT Stadium, Kharadar, Karachi', 0, 1, 'L');
+        // Item 8 — company-wise letterhead. A bill created before this
+        // change (or with no company picked) has no $bill->company and
+        // falls back to the old hard-coded M M Logistics block below.
+        $company = $bill->company;
+        $textX = 10;
+        if ($company) {
+            $logoPath = $company->logo ? Storage::disk('public')->path($company->logo) : null;
+            if ($logoPath && file_exists($logoPath)) {
+                $pdf->Image($logoPath, 10, 8, 22);
+                $textX = 34;
+            }
+
+            $pdf->SetFont('helvetica', 'B', 16);
+            $pdf->SetXY($textX, 10);
+            $pdf->Cell(0, 7, strtoupper($company->name), 0, 1, 'L');
+            $pdf->SetFont('helvetica', '', 9);
+            $lineY = 17;
+            if ($company->address) {
+                $pdf->SetXY($textX, $lineY);
+                $pdf->Cell(0, 5, $company->address, 0, 1, 'L');
+                $lineY += 5;
+            }
+            if ($company->contact_no) {
+                $pdf->SetXY($textX, $lineY);
+                $pdf->Cell(0, 5, 'Contact: ' . $company->contact_no, 0, 1, 'L');
+            }
+        } else {
+            $pdf->SetFont('helvetica', 'B', 16);
+            $pdf->SetXY(10, 10);
+            $pdf->Cell(0, 7, 'M M LOGISTICS', 0, 1, 'L');
+            $pdf->SetFont('helvetica', '', 9);
+            $pdf->SetXY(10, 17);
+            $pdf->Cell(0, 5, 'Room No 301/307, 3rd Floor, Custom Trade Tower,', 0, 1, 'L');
+            $pdf->SetXY(10, 22);
+            $pdf->Cell(0, 5, 'KPT Stadium, Kharadar, Karachi', 0, 1, 'L');
+        }
 
         $pdf->SetFont('helvetica', 'B', 14);
         $pdf->SetXY(140, 10);
@@ -294,6 +335,7 @@ class BillController extends Controller
                         <tr><td width="40%"><b>Bill No.</b></td><td width="60%">' . e($bill->bill_no) . '</td></tr>
                         <tr><td width="40%"><b>Bill Date</b></td><td width="60%">' . $bill->bill_date->format('d-m-Y') . '</td></tr>
                         <tr><td width="40%"><b>Period</b></td><td width="60%">' . $bill->from_date->format('d-m-Y') . ' — ' . $bill->to_date->format('d-m-Y') . '</td></tr>
+                        <tr><td width="40%"><b>Created By</b></td><td width="60%">' . e($bill->creator->name ?? '—') . '</td></tr>
                     </table>
                 </td>
             </tr>
@@ -307,7 +349,7 @@ class BillController extends Controller
                 <th width="10%">Date</th>
                 <th width="17%">Vehicle / Vendor</th>
                 <th width="17%">Route / Destination</th>
-                <th width="12%">Retention Charges</th>
+                <th width="12%">Detention Charges</th>
                 <th width="11%">Other Charges</th>
                 <th width="11%">Job Total</th>
             </tr>';
@@ -320,7 +362,7 @@ class BillController extends Controller
                 <td>' . $job->date->format('d-m-Y') . '</td>
                 <td>' . e($isPty ? ($job->vendor->name ?? '—') : ($job->vehicles->pluck('vehicle.name')->filter()->implode(', ') ?: '—')) . '</td>
                 <td>' . e($isPty ? ($job->pty_destination ?? '—') : ($job->route->name ?? ($job->vehicles->pluck('route.name')->filter()->implode(', ') ?: '—'))) . '</td>
-                <td align="right">' . number_format($job->retention_charges_total, 2) . '</td>
+                <td align="right">' . number_format($job->detention_charges_total, 2) . '</td>
                 <td align="right">' . number_format($job->other_charges_total, 2) . '</td>
                 <td align="right">' . number_format($job->job_total, 2) . '</td>
             </tr>';
@@ -328,8 +370,8 @@ class BillController extends Controller
 
         $html .= '
             <tr style="background-color:#f5f5f5;">
-                <td colspan="5" align="right">Retention Charges Subtotal</td>
-                <td colspan="3" align="right">' . number_format($bill->retention_charges_subtotal, 2) . '</td>
+                <td colspan="5" align="right">Detention Charges Subtotal</td>
+                <td colspan="3" align="right">' . number_format($bill->detention_charges_subtotal, 2) . '</td>
             </tr>
             <tr style="background-color:#f5f5f5;">
                 <td colspan="5" align="right">Other Charges Subtotal</td>
@@ -345,6 +387,64 @@ class BillController extends Controller
             </tr>';
         $html .= '</table>';
         $pdf->writeHTML($html, true, false, true, false, '');
+        $pdf->Ln(3);
+
+        // Item 9 — the Rent/Labour/Yard/Kanta/Extra Port/Detention breakdown
+        // that used to live on the Job Slip print now lives here instead,
+        // summed across every job this bill aggregates (same row labels and
+        // layout Job Slip used to show for a single job).
+        $pdf->SetFont('helvetica', 'B', 10);
+        $pdf->Cell(0, 6, 'Charges Breakdown', 0, 1, 'L');
+
+        $breakdownHtml = '
+        <table border="0.3" cellpadding="4" cellspacing="0" width="100%" style="text-align:right;font-size:10px;">
+            <tr><td width="80%" align="left">Rent</td><td width="20%">' . number_format($bill->jobs->sum('rent'), 2) . '</td></tr>
+            <tr><td align="left">Labour Charges</td><td>' . number_format($bill->jobs->sum('labour_charges'), 2) . '</td></tr>
+            <tr><td align="left">Yard Charges</td><td>' . number_format($bill->jobs->sum('yard_charges'), 2) . '</td></tr>
+            <tr><td align="left">Weight Bridge (Kanta)</td><td>' . number_format($bill->jobs->sum('kanta_charges'), 2) . '</td></tr>
+            <tr><td align="left">Extra Port Charges</td><td>' . number_format($bill->jobs->sum('extra_port_charges_total'), 2) . '</td></tr>
+            <tr><td align="left">Detention Charges</td><td>' . number_format($bill->jobs->sum('detention_total'), 2) . '</td></tr>
+        </table>';
+        $pdf->writeHTML($breakdownHtml, true, false, true, false, '');
+        $pdf->Ln(4);
+
+        // Item 10 — every vehicle across every job on this bill (matching
+        // the Job Slip's own Vehicles table), rather than the collapsed
+        // comma-separated list in the "Vehicle / Vendor" column above.
+        $vehicleRowsHtml = '';
+        $vi = 0;
+        foreach ($bill->jobs as $job) {
+            if ($job->job_type === 'party_to_party') {
+                $vi++;
+                $vehicleRowsHtml .= '<tr>
+                    <td>' . $vi . '</td>
+                    <td>' . e($job->job_no) . '</td>
+                    <td>' . e($job->pty_vehicle_no ?? '—') . '</td>
+                    <td>—</td>
+                    <td>—</td>
+                </tr>';
+                continue;
+            }
+            foreach ($job->vehicles as $line) {
+                $vi++;
+                $vehicleRowsHtml .= '<tr>
+                    <td>' . $vi . '</td>
+                    <td>' . e($job->job_no) . '</td>
+                    <td>' . e($line->vehicle->name ?? '') . ' (' . e($line->vehicle->vehicle_no ?? '') . ')</td>
+                    <td>' . e($line->container_no ?? '—') . '</td>
+                    <td>' . e($line->deliveryChallan->dc_no ?? '—') . '</td>
+                </tr>';
+            }
+        }
+
+        $pdf->SetFont('helvetica', 'B', 10);
+        $pdf->Cell(0, 6, 'Vehicles (' . $vi . ')', 0, 1, 'L');
+
+        $vehHtml = '<table border="0.3" cellpadding="4" cellspacing="0" width="100%" style="font-size:10px;">
+            <tr style="background-color:#f5f5f5;font-weight:bold;">
+                <th width="6%">#</th><th width="14%">Job No.</th><th width="35%">Vehicle</th><th width="25%">Container #</th><th width="20%">DC #</th>
+            </tr>' . $vehicleRowsHtml . '</table>';
+        $pdf->writeHTML($vehHtml, true, false, true, false, '');
         $pdf->Ln(3);
 
         // Item 14 — make explicit that Sales Tax, when applicable, is a

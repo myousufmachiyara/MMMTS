@@ -36,15 +36,16 @@ class DailyJob extends Model
         'per_day_extra_days',
         'per_day_total',
         'extra_port_charges_total',
-        // Retention Charges (item 9's naming) — shared across every vehicle
-        // on the job (see the 2026_09_04 migration). Not to be confused
-        // with per_day_* above, which is the OLD single-vehicle-era naming
-        // left untouched for historical jobs.
-        'retention_first_day_charges',
-        'retention_next_day_rate',
-        'retention_extra_days',
-        'retention_night_rate',
-        'retention_total',
+        // Detention Charges (item 9's naming, renamed from "Retention" per
+        // item 6) — shared across every vehicle on the job (see the
+        // 2026_09_04 / 2026_09_05 migrations). Not to be confused with
+        // per_day_* above, which is the OLD single-vehicle-era naming left
+        // untouched for historical jobs.
+        'detention_first_day_charges',
+        'detention_next_day_rate',
+        'detention_extra_days',
+        'detention_night_rate',
+        'detention_total',
         'job_total',
         'bill_id',
         'remarks',
@@ -87,6 +88,12 @@ class DailyJob extends Model
     public function vehicle()
     {
         return $this->belongsTo(Vehicle::class);
+    }
+
+    // Item 4 — who created this job, shown on the Job Slip print.
+    public function creator()
+    {
+        return $this->belongsTo(User::class, 'created_by');
     }
 
     public function customer()
@@ -140,7 +147,7 @@ class DailyJob extends Model
     // row carries only vehicle_id/container_no/delivery_challan_id — route,
     // trip plan, and every rate/charge field are shared across all of a
     // job's vehicles and live on the job header instead (see this model's
-    // route_id/rent/retention_* etc. and sharedExtraPortCharges() above).
+    // route_id/rent/detention_* etc. and sharedExtraPortCharges() above).
     // Every direct job — old or new — has at least one row: pre-rewrite
     // jobs were backfilled with exactly one (see the
     // 2026_09_03_000005 migration).
@@ -152,6 +159,29 @@ class DailyJob extends Model
     public function bill()
     {
         return $this->belongsTo(Bill::class);
+    }
+
+    // Every DeliveryChallan whose HEADER points at this job (item 1's
+    // daily_job_id column) — normally at most one per vehicle eventually,
+    // but a brand-new/pending job can have exactly one (the DC that spawned
+    // it) before any vehicle is assigned. See DeliveryChallan::dailyJob()
+    // and the 2026_09_11_000001 migration's docblock for how this differs
+    // from a vehicle-row's own delivery_challan_id link.
+    public function deliveryChallans()
+    {
+        return $this->hasMany(DeliveryChallan::class);
+    }
+
+    // The DC (if any) that is attached to this job's header but hasn't yet
+    // been assigned to one of its vehicle-rows — i.e. the "pending" DC a
+    // job created via the Delivery Challan flow (item 1) starts with. Once
+    // someone picks a vehicle for it, its vehicleLine appears and it stops
+    // being "pending" (see DailyJobController::syncDeliveryChallanLinks()).
+    // Requires deliveryChallans.vehicleLine to be loaded to avoid N+1 —
+    // callers that use this should eager-load 'deliveryChallans.vehicleLine'.
+    public function getPendingDeliveryChallanAttribute(): ?DeliveryChallan
+    {
+        return $this->deliveryChallans->first(fn ($dc) => !$dc->vehicleLine);
     }
 
     // True if ANY vehicle-row on this job still has no Delivery Challan
@@ -185,7 +215,7 @@ class DailyJob extends Model
     // "Other charges" = everything except the Trip Plan portion. Trip Plan
     // no longer carries any charges of its own (item 2) — tax is applied to
     // the job's grand total instead (item 13). Rent/labour/yard/kanta/
-    // retention/extra-port-charges are shared once across the whole job
+    // detention/extra-port-charges are shared once across the whole job
     // (not per vehicle any more — see this model's vehicles() docblock), so
     // for Direct jobs this is simply those job-header fields added up, once,
     // regardless of how many vehicles are on the job. Party-to-Party jobs
@@ -200,20 +230,20 @@ class DailyJob extends Model
 
         return round(
             (float) $this->rent + (float) $this->labour_charges + (float) $this->yard_charges
-            + (float) $this->kanta_charges + (float) $this->retention_total + (float) $this->extra_port_charges_total,
+            + (float) $this->kanta_charges + (float) $this->detention_total + (float) $this->extra_port_charges_total,
             2
         );
     }
 
-    // Retention Charges (formerly "Per Day Charges", item 9) — a single
-    // shared amount per job (item 10's Bill column). Not meaningful for
-    // Party-to-Party jobs.
-    public function getRetentionChargesTotalAttribute()
+    // Detention Charges (formerly "Per Day Charges", then "Retention
+    // Charges" — item 6/9) — a single shared amount per job (item 10's Bill
+    // column). Not meaningful for Party-to-Party jobs.
+    public function getDetentionChargesTotalAttribute()
     {
         if ($this->job_type === 'party_to_party') {
             return 0;
         }
 
-        return round((float) $this->retention_total, 2);
+        return round((float) $this->detention_total, 2);
     }
 }

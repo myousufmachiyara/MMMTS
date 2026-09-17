@@ -187,6 +187,11 @@ class AccountsReportController extends Controller
                 $this->fmt($dr),
                 $this->fmt($cr),
                 $this->fmt($runningBal),
+                // FIX 2: the voucher's real type (journal/receipt/etc.) — not
+                // rendered as a column, only used by the blade to build a
+                // correctly-typed print link instead of always assuming
+                // 'journal' (a Payment's auto-posted voucher is 'receipt').
+                $v->voucher_type,
             ]);
         }
 
@@ -246,13 +251,14 @@ class AccountsReportController extends Controller
                 $drAmount,
                 $crAmount,
                 $this->fmt($runningBal),
+                // FIX 2: real voucher type — see generalLedger()'s note above.
+                $v->voucher_type,
             ];
         });
 
         return $rows->concat($movements);
     }
-
-    // ─────────────────────────────────────────────────────────────
+        // ─────────────────────────────────────────────────────────────
     // PROFIT & LOSS
     // Period-only (Mode B) — revenue, COGS, expenses
     // ─────────────────────────────────────────────────────────────
@@ -475,7 +481,14 @@ class AccountsReportController extends Controller
         return Voucher::with(['debitAccount', 'creditAccount'])
             ->whereBetween('date', [$from, $to])
             ->whereNull('deleted_at')
-            ->whereNull('reference')          // exclude system entries (PI-, SI-, PR-, SR-)
+            // FIX 3: this is the manual Journal Voucher book — restrict to
+            // voucher_type 'journal' explicitly. Without this, a Payment's
+            // auto-posted 'receipt' voucher was also slipping in whenever it
+            // had no reference (e.g. a cash payment line, which has no
+            // cheque number) since it also passed the whereNull(reference)
+            // check below.
+            ->where('voucher_type', 'journal')
+            ->whereNull('reference')          // exclude system entries (Bill/Invoice auto-posted journal vouchers)
             ->orderBy('date')
             ->get()
             ->map(fn($v) => [

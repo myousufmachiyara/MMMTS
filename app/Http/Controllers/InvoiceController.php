@@ -9,6 +9,7 @@ use App\Models\Voucher;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Storage;
 
 class InvoiceController extends Controller
 {
@@ -228,7 +229,7 @@ class InvoiceController extends Controller
     // itemised by the bills that make up this invoice.
     public function print($id)
     {
-        $invoice = Invoice::with(['customer', 'bills'])->findOrFail($id);
+        $invoice = Invoice::with(['customer', 'bills.company', 'creator'])->findOrFail($id);
 
         $pdf = new \TCPDF();
         $pdf->setPrintHeader(false);
@@ -240,16 +241,49 @@ class InvoiceController extends Controller
         $pdf->AddPage();
         $pdf->setCellPadding(1.5);
 
-        $logoPath = public_path('assets/img/logo.png');
-        if (file_exists($logoPath)) {
-            $pdf->Image($logoPath, 12, 8, 40);
+        // Item 8 — an Invoice has no company of its own; it simply reads the
+        // company off the first of the bills it aggregates (in practice an
+        // invoice only ever aggregates bills from one company). Falls back
+        // to the old hard-coded M M Logistics logo if none of its bills has
+        // a company set (e.g. bills created before item 8).
+        $company = optional($invoice->bills->first())->company;
+
+        $textX = 12;
+        // Width capped at 22mm (rather than the old fixed 40mm) so an
+        // unusually tall/narrow logo doesn't grow past the divider line
+        // below and collide with the customer block that follows it.
+        $logoPath = $company && $company->logo ? Storage::disk('public')->path($company->logo) : public_path('assets/img/logo.png');
+        if ($logoPath && file_exists($logoPath)) {
+            $pdf->Image($logoPath, 10, 8, 22);
+            $textX = 34;
+        }
+
+        $pdf->SetFont('helvetica', 'B', 14);
+        $pdf->SetXY($textX, 10);
+        $pdf->Cell(0, 7, $company ? strtoupper($company->name) : 'M M LOGISTICS', 0, 1, 'L');
+        $pdf->SetFont('helvetica', '', 8);
+        $lineY = 17;
+        if ($company && $company->address) {
+            $pdf->SetXY($textX, $lineY);
+            $pdf->Cell(0, 4, $company->address, 0, 1, 'L');
+            $lineY += 4;
+        }
+        if ($company && $company->contact_no) {
+            $pdf->SetXY($textX, $lineY);
+            $pdf->Cell(0, 4, 'Contact: ' . $company->contact_no, 0, 1, 'L');
         }
 
         $pdf->SetFont('helvetica', 'B', 14);
         $pdf->SetXY(120, 12);
         $pdf->Cell(80, 8, $invoice->is_taxable ? 'SALES TAX INVOICE' : 'SALES INVOICE', 0, 1, 'R');
 
-        $pdf->Ln(5);
+        // A fixed divider line (mirroring Bill's letterhead) placed clear of
+        // the 22mm-tall logo (bottom edge ~30mm) and of the text block above
+        // it, then an explicit SetY — not a Ln() off the text block, whose
+        // height varies with whether an address/contact were printed — so
+        // the info table below always starts at the same fixed position.
+        $pdf->Line(10, 32, 200, 32);
+        $pdf->SetY(37);
         $pdf->SetFont('helvetica', '', 10);
 
         $infoHtml = '
@@ -263,6 +297,7 @@ class InvoiceController extends Controller
                     <table border="1" cellpadding="4" cellspacing="0" style="font-size:10px;">
                         <tr><td width="40%"><b>Invoice No.</b></td><td width="60%">' . e($invoice->invoice_no) . '</td></tr>
                         <tr><td width="40%"><b>Invoice Date</b></td><td width="60%">' . $invoice->invoice_date->format('d-m-Y') . '</td></tr>
+                        <tr><td width="40%"><b>Created By</b></td><td width="60%">' . e($invoice->creator->name ?? '—') . '</td></tr>
                     </table>
                 </td>
             </tr>

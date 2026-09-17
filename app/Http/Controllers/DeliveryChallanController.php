@@ -3,17 +3,28 @@
 namespace App\Http\Controllers;
 
 use App\Models\ChartOfAccounts;
+use App\Models\DailyJob;
 use App\Models\DeliveryChallan;
 use App\Models\Port;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 
 /**
  * Delivery Challan (DC) — item 7. Standalone entity, creatable BEFORE any
- * job exists: pick a customer + a single port, fill the rest by hand. It
- * is later linked to a specific vehicle-row on a Daily Job by entering/
- * selecting its DC# (see DailyJobController — only UNLINKED DCs are
- * offered there, via the unlinked() endpoint below).
+ * job's DETAILS exist. Since item 1, creating a DC also auto-creates a
+ * "pending" Direct job at the same time (job_no + status='incomplete' only
+ * — see store()) so every DC always has a job to show against it; that
+ * job's actual vehicle/route/rates get filled in later, from the Edit Job
+ * screen, same as any other incomplete job.
+ *
+ * The DC itself is later ASSIGNED to a specific vehicle-row on a Daily Job
+ * by entering/selecting its DC# (see DailyJobController — only DCs not yet
+ * assigned to a vehicle are offered there, via the unlinked() endpoint
+ * below). See DeliveryChallan::dailyJob()/vehicleLine() and the
+ * 2026_09_11_000001 migration's docblock for how the job-header-level link
+ * (set here, at creation) differs from the vehicle-row-level one (set once
+ * a vehicle is actually picked).
  *
  * This is a separate module from the legacy per-job DC fields that still
  * live on daily_jobs (see DailyJobController::saveDc/printDc) — those
@@ -23,7 +34,7 @@ class DeliveryChallanController extends Controller
 {
     public function index(Request $request)
     {
-        $query = DeliveryChallan::with(['customer', 'port', 'vehicleLine.dailyJob']);
+        $query = DeliveryChallan::with(['customer', 'port', 'vehicleLine.dailyJob', 'dailyJob']);
 
         if ($request->filled('customer_id') && $request->customer_id !== 'all') {
             $query->where('customer_id', $request->customer_id);
@@ -63,6 +74,22 @@ class DeliveryChallanController extends Controller
         return 'DC-' . str_pad(($last ?? 0) + 1, 6, '0', STR_PAD_LEFT);
     }
 
+    // Duplicated from DailyJobController — same convention already used for
+    // nextDcNo() there (that controller has its own copy for the legacy
+    // per-job DC flow). Keeping each controller's numbering helper local
+    // avoids a cross-controller dependency for a one-line sequence lookup.
+    private function nextJobNo(): string
+    {
+        $last = DailyJob::withTrashed()
+            ->where('job_no', 'like', 'DJ-%')
+            ->pluck('job_no')
+            ->map(fn ($no) => (int) substr($no, 3))
+            ->sort()
+            ->last();
+
+        return 'DJ-' . str_pad(($last ?? 0) + 1, 6, '0', STR_PAD_LEFT);
+    }
+
     private function rules(): array
     {
         return [
@@ -87,14 +114,42 @@ class DeliveryChallanController extends Controller
 
             $data = $request->validate($this->rules());
 
-            $dc = DeliveryChallan::create(array_merge($data, [
-                'dc_no'      => $this->nextDcNo(),
-                'created_by' => auth()->id(),
-                'updated_by' => auth()->id(),
-            ]));
+            $dc = DB::transaction(function () use ($data) {
+                $dc = DeliveryChallan::create(array_merge($data, [
+                    'dc_no'      => $this->nextDcNo(),
+                    'created_by' => auth()->id(),
+                    'updated_by' => auth()->id(),
+                ]));
+
+                // Item 1 — creating a DC also creates its pending Direct job
+                // right away: job_no only, status='incomplete'. Only the
+                // handful of fields the DC itself already carries (date,
+                // customer) are copied across — everything else (vehicle,
+                // route, rates) is deliberately left unset for whoever
+                // fills in the job's basic details next (see
+                // DailyJobController::edit()/_form.blade.php's pendingDc
+                // handling). Not run through DailyJobController::persist()
+                // since there is no form submission to validate here — this
+                // is a direct, minimal insert.
+                $job = DailyJob::create([
+                    'job_no'          => $this->nextJobNo(),
+                    'job_type'        => 'direct',
+                    'status'          => 'incomplete',
+                    'date'            => $dc->dc_date,
+                    'customer_id'     => $dc->customer_id,
+                    'trip_plan_total' => 0,
+                    'job_total'       => 0,
+                    'created_by'      => auth()->id(),
+                    'updated_by'      => auth()->id(),
+                ]);
+
+                $dc->update(['daily_job_id' => $job->id]);
+
+                return $dc;
+            });
 
             return redirect()->route('delivery-challans.index')
-                ->with('success', "Delivery Challan {$dc->dc_no} created successfully.");
+                ->with('success', "Delivery Challan {$dc->dc_no} created — pending job {$dc->dailyJob->job_no} was created with it. Fill in its vehicle/route from Daily Jobs > Edit when ready.");
 
         } catch (\Throwable $e) {
             Log::error('[DeliveryChallan] Store error', ['message' => $e->getMessage(), 'trace' => $e->getTraceAsString()]);
@@ -138,13 +193,28 @@ class DeliveryChallanController extends Controller
     public function destroy($id)
     {
         try {
-            $dc = DeliveryChallan::findOrFail($id);
+            $dc = DeliveryChallan::with('dailyJob.vehicles')->findOrFail($id);
 
             if ($dc->vehicleLine()->exists()) {
                 return redirect()->back()->with('error', "Delivery Challan {$dc->dc_no} is linked to a job and cannot be deleted. Unlink it from the job first.");
             }
 
-            $dc->delete();
+            DB::transaction(function () use ($dc) {
+                // Item 1's auto-created pending job has no accounting weight
+                // of its own until a vehicle is actually added to it (the
+                // vehicleLine guard above already rules that case out) — so
+                // it's safe, and expected, to remove it together with its
+                // DC rather than leave a useless empty "incomplete" job
+                // behind. A job that already has OTHER vehicle-rows besides
+                // this DC's own (e.g. it was created via "Add Direct Job"
+                // and this DC was picked afterwards) is left alone — only a
+                // job with zero vehicle-rows is cleaned up here.
+                if ($dc->dailyJob && $dc->dailyJob->vehicles->isEmpty()) {
+                    $dc->dailyJob->delete();
+                }
+
+                $dc->delete();
+            });
 
             return redirect()->route('delivery-challans.index')->with('success', 'Delivery Challan deleted successfully.');
 
@@ -154,12 +224,29 @@ class DeliveryChallanController extends Controller
         }
     }
 
-    // AJAX: unlinked DCs available to attach to a vehicle-row when creating/
-    // editing a Daily Job — "show only unlinked DC# in dropdown for linking"
-    // (item 7). Optionally scoped to a customer.
+    // AJAX: DCs available to assign to a vehicle-row when creating/editing a
+    // Daily Job — "show only unassigned DC# in dropdown for linking" (item
+    // 7), i.e. DCs with no vehicleLine yet. Since item 1, that now includes
+    // every DC whose own auto-created pending job hasn't had a vehicle
+    // picked for it yet — which is exactly what should show up (and get
+    // pre-selected — see _form.blade.php's pendingDc handling) for THIS
+    // job's own vehicle rows.
+    //
+    // A DC pending against a DIFFERENT job (job_id not passed, or passed
+    // but not matching) is excluded — it belongs to that other job's own
+    // pending workflow, not up for grabs here. Pass job_id (the job
+    // currently being created/edited, if any) so its own pending DC is
+    // still included even though it already has a daily_job_id set.
     public function unlinked(Request $request)
     {
-        $query = DeliveryChallan::whereDoesntHave('vehicleLine')->with('customer');
+        $query = DeliveryChallan::whereDoesntHave('vehicleLine')
+            ->where(function ($q) use ($request) {
+                $q->whereNull('daily_job_id');
+                if ($request->filled('job_id')) {
+                    $q->orWhere('daily_job_id', $request->job_id);
+                }
+            })
+            ->with('customer');
 
         if ($request->filled('customer_id')) {
             $query->where('customer_id', $request->customer_id);
@@ -176,10 +263,18 @@ class DeliveryChallanController extends Controller
         return response()->json($challans);
     }
 
-    // Print — 2 copies in one PDF: Customer Copy then Company Copy (item 6).
+    // Print — both copies (Customer Copy + Company Copy) stacked on ONE page
+    // rather than 2 separate pages, to save paper (item 6). The Company
+    // Copy's vertical offset is computed from wherever the Customer Copy's
+    // content actually finished (via GetY()) instead of a hard-coded guess,
+    // so this keeps working if renderDcPage()'s content height ever changes.
+    // Auto page-break is turned off — TCPDF's default ~25mm bottom-margin
+    // auto-break would otherwise push the tail of the Company Copy onto an
+    // unwanted 3rd page once both copies' combined height gets close to a
+    // full A4 page.
     public function print($id)
     {
-        $dc = DeliveryChallan::with(['customer', 'port', 'vehicleLine.dailyJob.vehicle'])->findOrFail($id);
+        $dc = DeliveryChallan::with(['customer', 'port', 'vehicleLine.dailyJob.vehicle', 'dailyJob', 'creator'])->findOrFail($id);
 
         $pdf = new \TCPDF();
         $pdf->setPrintHeader(false);
@@ -189,39 +284,64 @@ class DeliveryChallanController extends Controller
         $pdf->SetTitle('Delivery Challan ' . $dc->dc_no);
         $pdf->SetMargins(10, 10, 10);
         $pdf->setCellPadding(1.5);
+        $pdf->SetAutoPageBreak(false, 0);
+        $pdf->AddPage();
 
-        foreach (['CUSTOMER COPY', 'COMPANY COPY'] as $copyLabel) {
-            $pdf->AddPage();
-            $this->renderDcPage($pdf, $dc, $copyLabel);
-        }
+        $this->renderDcPage($pdf, $dc, 'CUSTOMER COPY', 0);
+
+        $cutY = $pdf->GetY() + 5;
+        $pdf->SetLineStyle(['width' => 0.2, 'dash' => '2,2', 'color' => [140, 140, 140]]);
+        $pdf->Line(10, $cutY, 200, $cutY);
+        $pdf->SetLineStyle(['width' => 0.2, 'dash' => 0, 'color' => [0, 0, 0]]);
+        $pdf->SetFont('helvetica', '', 7);
+        $pdf->SetTextColor(140, 140, 140);
+        $pdf->SetXY(10, $cutY - 3);
+        $pdf->Cell(190, 4, '- - - - - - - - - - - - - - - - - -  C U T   H E R E  - - - - - - - - - - - - - - - - - -', 0, 0, 'C');
+        $pdf->SetTextColor(0, 0, 0);
+
+        $this->renderDcPage($pdf, $dc, 'COMPANY COPY', $cutY + 5);
 
         return $pdf->Output('dc_' . $dc->dc_no . '.pdf', 'I');
     }
 
-    private function renderDcPage(\TCPDF $pdf, DeliveryChallan $dc, string $copyLabel): void
+    private function renderDcPage(\TCPDF $pdf, DeliveryChallan $dc, string $copyLabel, float $yOffset = 0): void
     {
+        $logoPath = public_path('assets/img/logo.png');
+        if (file_exists($logoPath)) {
+            $pdf->Image($logoPath, 12, $yOffset + 8, 25);
+        }
+
         $pdf->SetFont('helvetica', 'B', 16);
-        $pdf->SetXY(10, 10);
+        $pdf->SetXY(40, $yOffset + 10);
         $pdf->Cell(0, 7, 'M M LOGISTICS', 0, 1, 'L');
         $pdf->SetFont('helvetica', '', 9);
-        $pdf->SetXY(10, 17);
-        $pdf->Cell(0, 5, 'Room No 301/307, 3rd Floor, Custom Trade Tower,', 0, 1, 'L');
-        $pdf->SetXY(10, 22);
+        $pdf->SetXY(40, $yOffset + 17);
+        $pdf->Cell(0, 5, 'Room No 301, 303, 305, 307, 3rd Floor, Custom Trade Tower,', 0, 1, 'L');
+        $pdf->SetXY(40, $yOffset + 22);
         $pdf->Cell(0, 5, 'KPT Stadium, Kharadar, Karachi', 0, 1, 'L');
 
         $pdf->SetFont('helvetica', 'B', 14);
-        $pdf->SetXY(140, 10);
+        $pdf->SetXY(140, $yOffset + 10);
         $pdf->Cell(60, 6, 'DELIVERY CHALLAN', 0, 1, 'R');
         $pdf->SetFont('helvetica', 'B', 10);
-        $pdf->SetXY(140, 17);
+        $pdf->SetXY(140, $yOffset + 17);
         $pdf->Cell(60, 6, $copyLabel, 0, 1, 'R');
 
-        $pdf->Line(10, 30, 200, 30);
-        $pdf->Ln(12);
+        // yOffset applied only up to here — Line() doesn't move the cursor,
+        // but everything below (writeHTML tables, Ln(), the GetY()-based
+        // signature block) advances relative to whatever Y the cell calls
+        // above already left the cursor at, so it naturally stays offset
+        // without needing $yOffset added to every subsequent call.
+        $pdf->Line(10, $yOffset + 30, 200, $yOffset + 30);
+        $pdf->Ln(9);
 
         $pdf->SetFont('helvetica', '', 10);
         $vehicleLine = $dc->vehicleLine;
-        $job = $vehicleLine?->dailyJob;
+        // Prefer the vehicle-assigned job (the normal case); fall back to
+        // this DC's own pending job header (item 1) so a DC printed before
+        // any vehicle has been picked for it still shows its Job No.
+        // rather than "not linked to a job yet".
+        $job = $vehicleLine?->dailyJob ?? $dc->dailyJob;
 
         $headHtml = '
         <table cellpadding="3" cellspacing="0" width="100%">
@@ -254,7 +374,9 @@ class DeliveryChallanController extends Controller
             </tr>
             <tr>
                 <td><b>Container No.</b></td>
-                <td colspan="3">' . e($dc->container_no ?? '') . '</td>
+                <td>' . e($dc->container_no ?? '') . '</td>
+                <td><b>Created By</b></td>
+                <td>' . e($dc->creator->name ?? '—') . '</td>
             </tr>
         </table>';
         $pdf->writeHTML($detailsHtml, true, false, true, false, '');
@@ -287,7 +409,7 @@ class DeliveryChallanController extends Controller
         </table>';
         $pdf->writeHTML($gateHtml, true, false, true, false, '');
 
-        $pdf->Ln(18);
+        $pdf->Ln(11);
         $yPos = $pdf->GetY();
         $lineWidth = 50;
         $pdf->Line(20, $yPos, 20 + $lineWidth, $yPos);
@@ -297,5 +419,14 @@ class DeliveryChallanController extends Controller
         $pdf->Cell($lineWidth, 6, 'Driver / Received By', 0, 0, 'C');
         $pdf->SetXY(130, $yPos + 2);
         $pdf->Cell($lineWidth, 6, 'WITH COMPANY STAMP', 0, 0, 'C');
+
+        // The two Cell() calls above pass ln=0 (cursor doesn't advance to a
+        // new line), so GetY() would otherwise still report $yPos+2 — short
+        // of where this signature row actually ends visually. print()
+        // relies on GetY() right after this call to know where to place the
+        // CUT HERE divider / the next copy, so it must reflect the true
+        // bottom of this content or the divider ends up overlapping this
+        // signature line.
+        $pdf->SetY($yPos + 2 + 6);
     }
 }

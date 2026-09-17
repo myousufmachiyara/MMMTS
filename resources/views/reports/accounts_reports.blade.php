@@ -171,18 +171,15 @@
                                 @php $ref = $row[2] ?? ''; @endphp
                                 @if (str_starts_with($ref, 'Voucher #'))
                                     @php $vid = (int) str_replace('Voucher #', '', $ref); @endphp
-                                    {{-- FIX 2: Only print link, no eye icon --}}
-                                    <a href="{{ route('vouchers.print', ['type' => 'journal', 'id' => $vid]) }}"
+                                    {{-- FIX 2: link to the voucher's real type (journal/receipt/etc.),
+                                         not always 'journal' — a Payment's auto-posted voucher is 'receipt'. --}}
+                                    @php $vtype = $row[7] ?? 'journal'; @endphp
+                                    <a href="{{ route('vouchers.print', ['type' => $vtype, 'id' => $vid]) }}"
                                        target="_blank" class="ref-link">{{ $ref }}</a>
-                                @elseif (str_starts_with($ref, 'PI-'))
-                                    @php $pid = (int) str_replace('PI-', '', $ref); @endphp
-                                    <a href="{{ route('purchase_invoices.print', $pid) }}"
-                                       target="_blank" class="ref-link text-success">{{ $ref }}</a>
-                                @elseif (str_starts_with($ref, 'SI-'))
-                                    @php $sid = (int) str_replace('SI-', '', $ref); @endphp
-                                    <a href="{{ route('sale_invoices.print', $sid) }}"
-                                       target="_blank" class="ref-link text-primary">{{ $ref }}</a>
                                 @else
+                                    {{-- No Purchase/Sale Invoice module exists in this app (no routes are
+                                         registered for it), so any other reference is shown as plain text
+                                         rather than linking to a route that doesn't exist. --}}
                                     <span class="text-muted fst-italic">{{ $ref }}</span>
                                 @endif
                             </td>
@@ -200,16 +197,9 @@
                                 @php $ref = $row[2] ?? ''; @endphp
                                 @if (str_starts_with($ref, 'Voucher #'))
                                     @php $vid = (int) str_replace('Voucher #', '', explode(' ', $ref)[0]); @endphp
-                                    <a href="{{ route('vouchers.print', ['type' => 'journal', 'id' => $vid]) }}"
+                                    @php $vtype = $row[7] ?? 'journal'; @endphp
+                                    <a href="{{ route('vouchers.print', ['type' => $vtype, 'id' => $vid]) }}"
                                        target="_blank" class="ref-link">{{ $ref }}</a>
-                                @elseif (str_starts_with($ref, 'PI-'))
-                                    @php $pid = (int) str_replace('PI-', '', $ref); @endphp
-                                    <a href="{{ route('purchase_invoices.print', $pid) }}"
-                                       target="_blank" class="ref-link text-success">{{ $ref }}</a>
-                                @elseif (str_starts_with($ref, 'SI-'))
-                                    @php $sid = (int) str_replace('SI-', '', $ref); @endphp
-                                    <a href="{{ route('sale_invoices.print', $sid) }}"
-                                       target="_blank" class="ref-link text-primary">{{ $ref }}</a>
                                 @else
                                     <span class="text-muted fst-italic">{{ $ref }}</span>
                                 @endif
@@ -223,6 +213,7 @@
                             {{-- row: [date, dr_account, cr_account, narration, dr, cr, balance] --}}
                             <td>{{ $row[0] }}</td>
                             <td>{{ $row[1] }}</td>
+                                                        <td>{{ $row[1] }}</td>
                             <td>{{ $row[2] }}</td>
                             <td class="narration">{{ $row[3] ?? '' }}</td>
                             <td class="text-end">{{ $row[4] ?? '' }}</td>
