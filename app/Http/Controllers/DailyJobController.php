@@ -675,19 +675,6 @@ class DailyJobController extends Controller
                 $pdf->Ln(2);
             }
 
-            $sumHtml = '
-            <table border="0.3" cellpadding="4" cellspacing="0" width="100%" style="text-align:right;font-size:10px;">
-                <tr><td width="80%" align="left">Rent</td><td width="20%">' . number_format($job->rent, 2) . '</td></tr>
-                <tr><td align="left">Labour Charges</td><td>' . number_format($job->labour_charges, 2) . '</td></tr>
-                <tr><td align="left">Yard Charges</td><td>' . number_format($job->yard_charges, 2) . '</td></tr>
-                <tr><td align="left">Weight Bridge (Kanta)</td><td>' . number_format($job->kanta_charges, 2) . '</td></tr>
-                <tr><td align="left">Extra Port Charges</td><td>' . number_format($job->extra_port_charges_total, 2) . '</td></tr>
-                <tr><td align="left">Detention Charges</td><td>' . number_format($job->detention_total, 2) . '</td></tr>
-                <tr style="background-color:#f5f5f5;font-weight:bold;"><td align="left">Job Grand Total</td><td>' . number_format($job->job_total, 2) . '</td></tr>
-            </table>';
-            $pdf->writeHTML($sumHtml, true, false, true, false, '');
-            $pdf->Ln(4);
-
             $pdf->SetFont('helvetica', 'B', 10);
             $pdf->Cell(0, 6, 'Vehicles (' . $job->vehicles->count() . ')', 0, 1, 'L');
 
