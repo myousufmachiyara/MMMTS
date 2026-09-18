@@ -28,6 +28,19 @@ class VehicleController extends Controller
         return view('vehicles.index', compact('vehicles', 'companies'));
     }
 
+    // System-generated: V-00001, V-00002, ... (never user-entered)
+    private function nextCode(): string
+    {
+        $last = Vehicle::withTrashed()
+            ->where('code', 'like', 'V-%')
+            ->pluck('code')
+            ->map(fn ($c) => (int) substr($c, 2))
+            ->sort()
+            ->last();
+
+        return 'V-' . str_pad(($last ?? 0) + 1, 5, '0', STR_PAD_LEFT);
+    }
+
     public function store(Request $request)
     {
         try {
@@ -36,14 +49,13 @@ class VehicleController extends Controller
             $validated = $request->validate([
                 'company_ids'   => 'nullable|array',
                 'company_ids.*' => 'exists:our_companies,id',
-                'code'          => ['required', 'string', 'max:50', Rule::unique('vehicles')->whereNull('deleted_at')],
                 'name'          => 'required|string|max:255',
                 'vehicle_no'    => ['nullable', 'string', 'max:50', Rule::unique('vehicles')->whereNull('deleted_at')],
                 'remarks'       => 'nullable|string|max:500',
             ]);
 
             $vehicle = Vehicle::create([
-                'code'       => $validated['code'],
+                'code'       => $this->nextCode(),
                 'name'       => $validated['name'],
                 'vehicle_no' => $validated['vehicle_no'] ?? null,
                 'remarks'    => $validated['remarks'] ?? null,
@@ -86,14 +98,13 @@ class VehicleController extends Controller
             $validated = $request->validate([
                 'company_ids'   => 'nullable|array',
                 'company_ids.*' => 'exists:our_companies,id',
-                'code'          => ['required', 'string', 'max:50', Rule::unique('vehicles')->ignore($id)->whereNull('deleted_at')],
                 'name'          => 'required|string|max:255',
                 'vehicle_no'    => ['nullable', 'string', 'max:50', Rule::unique('vehicles')->ignore($id)->whereNull('deleted_at')],
                 'remarks'       => 'nullable|string|max:500',
             ]);
 
+            // code is system-generated and never changes after creation
             $vehicle->update([
-                'code'       => $validated['code'],
                 'name'       => $validated['name'],
                 'vehicle_no' => $validated['vehicle_no'] ?? null,
                 'remarks'    => $validated['remarks'] ?? null,
