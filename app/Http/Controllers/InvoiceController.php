@@ -287,11 +287,12 @@ class InvoiceController extends Controller
         $pdf->SetFont('helvetica', '', 10);
 
         $infoHtml = '
-        <table cellpadding="3" cellspacing="0" width="60%">
+        <table cellpadding="3" cellspacing="0" width="100%">
             <tr>
                 <td width="60%">
                     <b>' . e($invoice->customer->name ?? '') . '</b><br>
-                    ' . e($invoice->customer->address ?? '') . '
+                    ' . e($invoice->customer->address ?? '') . '<br>
+                    ' . e($invoice->customer->trn ?? '') . '
                 </td>
                 <td width="40%">
                     <table border="1" cellpadding="4" cellspacing="0" style="font-size:10px;">
