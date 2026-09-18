@@ -114,42 +114,56 @@ class DeliveryChallanController extends Controller
 
             $data = $request->validate($this->rules());
 
-            $dc = DB::transaction(function () use ($data) {
+            // Item 1 (round 2) — whether to also spin up a pending job is now
+            // the user's choice, not automatic. The Create DC form submits
+            // this as a hidden+checkbox pair (0 when unchecked, 1 when
+            // checked — see delivery_challans/index.blade.php), so the key
+            // is always present; the true default only covers a stale
+            // cached form from before this field existed.
+            $createJob = $request->boolean('create_job', true);
+
+            $dc = DB::transaction(function () use ($data, $createJob) {
                 $dc = DeliveryChallan::create(array_merge($data, [
                     'dc_no'      => $this->nextDcNo(),
                     'created_by' => auth()->id(),
                     'updated_by' => auth()->id(),
                 ]));
 
-                // Item 1 — creating a DC also creates its pending Direct job
-                // right away: job_no only, status='incomplete'. Only the
-                // handful of fields the DC itself already carries (date,
-                // customer) are copied across — everything else (vehicle,
-                // route, rates) is deliberately left unset for whoever
-                // fills in the job's basic details next (see
-                // DailyJobController::edit()/_form.blade.php's pendingDc
-                // handling). Not run through DailyJobController::persist()
-                // since there is no form submission to validate here — this
-                // is a direct, minimal insert.
-                $job = DailyJob::create([
-                    'job_no'          => $this->nextJobNo(),
-                    'job_type'        => 'direct',
-                    'status'          => 'incomplete',
-                    'date'            => $dc->dc_date,
-                    'customer_id'     => $dc->customer_id,
-                    'trip_plan_total' => 0,
-                    'job_total'       => 0,
-                    'created_by'      => auth()->id(),
-                    'updated_by'      => auth()->id(),
-                ]);
+                if ($createJob) {
+                    // Item 1 — creating a DC can also create its pending
+                    // Direct job right away: job_no only, status='incomplete'.
+                    // Only the handful of fields the DC itself already
+                    // carries (date, customer) are copied across —
+                    // everything else (vehicle, route, rates) is
+                    // deliberately left unset for whoever fills in the
+                    // job's basic details next (see
+                    // DailyJobController::edit()/_form.blade.php's pendingDc
+                    // handling). Not run through DailyJobController::persist()
+                    // since there is no form submission to validate here —
+                    // this is a direct, minimal insert.
+                    $job = DailyJob::create([
+                        'job_no'          => $this->nextJobNo(),
+                        'job_type'        => 'direct',
+                        'status'          => 'incomplete',
+                        'date'            => $dc->dc_date,
+                        'customer_id'     => $dc->customer_id,
+                        'trip_plan_total' => 0,
+                        'job_total'       => 0,
+                        'created_by'      => auth()->id(),
+                        'updated_by'      => auth()->id(),
+                    ]);
 
-                $dc->update(['daily_job_id' => $job->id]);
+                    $dc->update(['daily_job_id' => $job->id]);
+                }
 
                 return $dc;
             });
 
-            return redirect()->route('delivery-challans.index')
-                ->with('success', "Delivery Challan {$dc->dc_no} created — pending job {$dc->dailyJob->job_no} was created with it. Fill in its vehicle/route from Daily Jobs > Edit when ready.");
+            $message = $dc->daily_job_id
+                ? "Delivery Challan {$dc->dc_no} created — pending job {$dc->dailyJob->job_no} was created with it. Fill in its vehicle/route from Daily Jobs > Edit when ready."
+                : "Delivery Challan {$dc->dc_no} created (no job). Link it to an existing job's vehicle from Daily Jobs > Edit when ready.";
+
+            return redirect()->route('delivery-challans.index')->with('success', $message);
 
         } catch (\Throwable $e) {
             Log::error('[DeliveryChallan] Store error', ['message' => $e->getMessage(), 'trace' => $e->getTraceAsString()]);

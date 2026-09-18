@@ -367,6 +367,37 @@ function renderRateFields() {
     recalcTotal();
 }
 
+// Item 2 (round 2) — every vehicle row's own DC dropdown, all currently
+// picked from the SAME set of DB-unlinked DCs. That set only reflects what's
+// actually saved, so a DC picked on row 1 but not yet saved would still show
+// up as "available" in row 2's dropdown too. selectedDcIdsExcept() reads
+// what every OTHER row currently has selected, right out of the DOM, so
+// refreshDcDropdown() below can filter those out before rendering options.
+function selectedDcIdsExcept(excludeVi) {
+    var ids = [];
+    document.querySelectorAll('#vehicleRows > tr').forEach(function(tr) {
+        var vi = tr.id.replace('vehicleRow_', '');
+        if (String(vi) === String(excludeVi)) return;
+        var el = document.getElementById('dc_select_' + vi);
+        if (el && el.value) ids.push(String(el.value));
+    });
+    return ids;
+}
+
+// Refreshes every vehicle row's DC dropdown except the one whose own
+// selection just changed (that row already reflects the user's pick — no
+// need to re-fetch it). Called whenever the set of "taken" DCs across the
+// form changes: after a DC is picked/cleared on any row, after a row is
+// removed, and once after seeding all of an existing job's rows on load.
+function refreshAllDcDropdowns(exceptVi) {
+    document.querySelectorAll('#vehicleRows > tr').forEach(function(tr) {
+        var vi = tr.id.replace('vehicleRow_', '');
+        if (exceptVi !== undefined && exceptVi !== null && String(vi) === String(exceptVi)) return;
+        var $s = $('#dc_select_' + vi);
+        if ($s.length) refreshDcDropdown(vi, $s.val(), null);
+    });
+}
+
 // ── Delivery Challan link dropdown — only DCs not yet assigned to a
 // vehicle are offered (item 7), which — since item 1 — now includes this
 // job's own pending DC (job_id is passed so unlinked() knows to still
@@ -383,6 +414,12 @@ function refreshDcDropdown(vi, selectedId, selectedLabel) {
     fetch(url, { headers: { 'Accept': 'application/json' } })
         .then(function(res) { return res.json(); })
         .then(function(list) {
+            // Item 2 (round 2) — drop any DC already selected on a DIFFERENT
+            // row of this same, still-unsaved form, so the same DC# can't be
+            // picked for two vehicles at once before saving.
+            var takenElsewhere = selectedDcIdsExcept(vi);
+            list = list.filter(function(dc) { return takenElsewhere.indexOf(String(dc.id)) === -1; });
+
             var html = '<option value="">— Not linked —</option>';
             var found = false;
             list.forEach(function(dc) {
@@ -448,7 +485,12 @@ function addVehicleRow(row) {
     initSelect2(tr);
     renumberVehicleRows();
 
-    $('#dc_select_' + vi).on('change', function() { onDcSelected(vi, this.value); });
+    $('#dc_select_' + vi).on('change', function() {
+        onDcSelected(vi, this.value);
+        // Item 2 (round 2) — this row's pick just changed, so every other
+        // row's "available" list needs to drop (or give back) that DC.
+        refreshAllDcDropdowns(vi);
+    });
 
     refreshDcDropdown(vi, row.delivery_challan_id, row.delivery_challan_label);
 
@@ -476,6 +518,9 @@ document.getElementById('vehicleRows').addEventListener('click', function(e) {
         }
         $(e.target.closest('tr')).remove();
         renumberVehicleRows();
+        // Item 2 (round 2) — the removed row may have been holding a DC
+        // that should now be offered to everyone else again.
+        refreshAllDcDropdowns();
     }
 });
 
@@ -509,6 +554,11 @@ $(document).ready(function() {
 
     if (existingVehicles.length) {
         existingVehicles.forEach(function(v) { addVehicleRow(v); });
+        // Item 2 (round 2) — each row above was populated before its
+        // sibling rows existed in the DOM yet, so an earlier row's dropdown
+        // may still be offering a DC that a later row already holds. One
+        // more pass now that every row is present cleans that up.
+        refreshAllDcDropdowns();
     } else {
         // Item 1 — a job created via the Delivery Challan flow starts with
         // zero vehicle-rows and its own DC still pending; seed the first

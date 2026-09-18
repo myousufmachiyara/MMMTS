@@ -142,6 +142,16 @@
               <div class="col-lg-12 mb-2">
                 <small class="text-muted">DC # will be generated automatically (e.g. DC-000001).</small>
               </div>
+              <div class="col-lg-12 mb-2">
+                <div class="form-check">
+                  <input type="hidden" name="create_job" value="0">
+                  <input type="checkbox" class="form-check-input" id="create_job" name="create_job" value="1" checked>
+                  <label class="form-check-label" for="create_job">
+                    <strong>Also create a pending job for this DC</strong>
+                  </label>
+                  <div><small class="text-muted">Uncheck this if this DC is for a vehicle you'll add to an <em>existing</em> job instead — you can link it from Daily Jobs &gt; Edit later, same as any other unlinked DC.</small></div>
+                </div>
+              </div>
               <div class="col-lg-4 mb-2">
                 <label>DC Date <span class="text-danger">*</span></label>
                 <input type="date" class="form-control" name="dc_date" value="{{ date('Y-m-d') }}" required>
