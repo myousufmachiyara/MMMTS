@@ -320,13 +320,9 @@ class DeliveryChallanController extends Controller
 
     private function renderDcPage(\TCPDF $pdf, DeliveryChallan $dc, string $copyLabel, float $yOffset = 0): void
     {
-        $logoPath = public_path('assets/img/logo.png');
-        if (file_exists($logoPath)) {
-            $pdf->Image($logoPath, 12, $yOffset + 8, 25);
-        }
 
         $pdf->SetFont('helvetica', 'B', 16);
-        $pdf->SetXY(40, $yOffset + 10);
+        $pdf->SetXY(40, $yOffset);
         $pdf->Cell(0, 7, 'M M LOGISTICS', 0, 1, 'L');
         $pdf->SetFont('helvetica', '', 9);
         $pdf->SetXY(40, $yOffset + 17);
