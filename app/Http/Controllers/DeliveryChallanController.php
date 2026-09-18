@@ -322,7 +322,7 @@ class DeliveryChallanController extends Controller
     {
 
         $pdf->SetFont('helvetica', 'B', 16);
-        $pdf->SetXY(40, $yOffset);
+        $pdf->SetXY(10, $yOffset + 10);
         $pdf->Cell(0, 7, 'M M LOGISTICS', 0, 1, 'L');
         $pdf->SetFont('helvetica', '', 9);
         $pdf->SetXY(40, $yOffset + 17);
