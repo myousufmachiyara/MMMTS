@@ -70,15 +70,22 @@ class BillController extends Controller
                     'job_type'                 => $job->job_type,
                     'date'                     => $job->date->format('Y-m-d'),
                     'vehicle'                  => $isPty ? ($job->pty_vehicle_no ?? '—') : ($job->vehicles->pluck('vehicle.name')->filter()->implode(', ') ?: '—'),
-                    // Route is shared across every vehicle on the job — read
-                    // from the job header, falling back to a per-vehicle
-                    // pluck only for older jobs saved before that change.
                     'route'                    => $isPty ? ($job->pty_destination ?? '—') : ($job->route->name ?? ($job->vehicles->pluck('route.name')->filter()->implode(', ') ?: '—')),
                     'vendor'                   => $isPty ? ($job->vendor->name ?? '—') : null,
                     'trip_plan_total'          => (float) $job->trip_plan_total,
                     'detention_charges_total'  => (float) $job->detention_charges_total,
                     'other_charges_total'      => (float) $job->other_charges_total,
-                    'job_total'                => (float) $job->job_total,
+                    // Item 3 (round 3) — this "Job Total" column in the bill
+                    // picker (bills/create.blade.php) always mirrored "Other
+                    // Charges" 1:1 already (same underlying formula); now
+                    // that Other Charges embeds the ×vehicle-count
+                    // multiplier (see DailyJob::getOtherChargesTotalAttribute()),
+                    // bill_amount keeps that same relationship instead of
+                    // silently showing the smaller, un-multiplied rate.
+                    'job_total'                => (float) $job->bill_amount,
+                    // Vehicle count included so the picker can show "×3"
+                    // next to jobs where the multiplier actually applies.
+                    'vehicle_count'            => $isPty ? 1 : $job->vehicles->filter(fn ($v) => $v->vehicle_id)->count(),
                 ];
             });
 
@@ -354,19 +361,25 @@ class BillController extends Controller
                 <th width="11%">Job Total</th>
             </tr>';
 
-        foreach ($bill->jobs as $i => $job) {
-            $isPty = $job->job_type === 'party_to_party';
-            $html .= '<tr>
-                <td>' . ($i + 1) . '</td>
-                <td>' . e($job->job_no) . '</td>
-                <td>' . $job->date->format('d-m-Y') . '</td>
-                <td>' . e($isPty ? ($job->vendor->name ?? '—') : ($job->vehicles->pluck('vehicle.name')->filter()->implode(', ') ?: '—')) . '</td>
-                <td>' . e($isPty ? ($job->pty_destination ?? '—') : ($job->route->name ?? ($job->vehicles->pluck('route.name')->filter()->implode(', ') ?: '—'))) . '</td>
-                <td align="right">' . number_format($job->detention_charges_total, 2) . '</td>
-                <td align="right">' . number_format($job->other_charges_total, 2) . '</td>
-                <td align="right">' . number_format($job->job_total, 2) . '</td>
-            </tr>';
-        }
+            foreach ($bill->jobs as $i => $job) {
+                $isPty = $job->job_type === 'party_to_party';
+                // Item 3 (round 3) — the multiplier only ever applies to a
+                // Direct job with more than one real vehicle-row; shown here so
+                // it's obvious why "Job Total" no longer matches the raw rate
+                // entered on the job form for those rows.
+                $vehicleCount = $isPty ? 1 : $job->vehicles->filter(fn ($v) => $v->vehicle_id)->count();
+                $multiplierNote = $vehicleCount > 1 ? ' (×' . $vehicleCount . ')' : '';
+                $html .= '<tr>
+                    <td>' . ($i + 1) . '</td>
+                    <td>' . e($job->job_no) . '</td>
+                    <td>' . $job->date->format('d-m-Y') . '</td>
+                    <td>' . e($isPty ? ($job->vendor->name ?? '—') : ($job->vehicles->pluck('vehicle.name')->filter()->implode(', ') ?: '—')) . '</td>
+                    <td>' . e($isPty ? ($job->pty_destination ?? '—') : ($job->route->name ?? ($job->vehicles->pluck('route.name')->filter()->implode(', ') ?: '—'))) . '</td>
+                    <td align="right">' . number_format($job->detention_charges_total, 2) . '</td>
+                    <td align="right">' . number_format($job->other_charges_total, 2) . '</td>
+                    <td align="right">' . number_format($job->bill_amount, 2) . e($multiplierNote) . '</td>
+                </tr>';
+            }
 
         $html .= '
             <tr style="background-color:#f5f5f5;">
@@ -393,17 +406,34 @@ class BillController extends Controller
         // that used to live on the Job Slip print now lives here instead,
         // summed across every job this bill aggregates (same row labels and
         // layout Job Slip used to show for a single job).
+                // Item 9 — the Rent/Labour/Yard/Kanta/Extra Port/Detention breakdown
+        // that used to live on the Job Slip print now lives here instead,
+        // summed across every job this bill aggregates (same row labels and
+        // layout Job Slip used to show for a single job).
         $pdf->SetFont('helvetica', 'B', 10);
         $pdf->Cell(0, 6, 'Charges Breakdown', 0, 1, 'L');
 
+        // Item 3 (round 3) — these used to sum each job's raw, once-entered
+        // rate columns directly. Now that a job's real bill amount
+        // multiplies by its vehicle count (see
+        // DailyJob::getOtherChargesTotalAttribute()), summing the raw
+        // columns here would silently under-report relative to the "Other
+        // Charges Subtotal" / grand total above for any multi-vehicle job —
+        // so each row is multiplied the same way before summing. Detention
+        // already goes through the (already-multiplied) detention_charges_total
+        // accessor rather than the raw detention_total column.
+        $chargeMultiplier = fn ($job) => $job->job_type === 'party_to_party'
+            ? 1
+            : max($job->vehicles->filter(fn ($v) => $v->vehicle_id)->count(), 1);
+
         $breakdownHtml = '
         <table border="0.3" cellpadding="4" cellspacing="0" width="100%" style="text-align:right;font-size:10px;">
-            <tr><td width="80%" align="left">Rent</td><td width="20%">' . number_format($bill->jobs->sum('rent'), 2) . '</td></tr>
-            <tr><td align="left">Labour Charges</td><td>' . number_format($bill->jobs->sum('labour_charges'), 2) . '</td></tr>
-            <tr><td align="left">Yard Charges</td><td>' . number_format($bill->jobs->sum('yard_charges'), 2) . '</td></tr>
-            <tr><td align="left">Weight Bridge (Kanta)</td><td>' . number_format($bill->jobs->sum('kanta_charges'), 2) . '</td></tr>
-            <tr><td align="left">Extra Port Charges</td><td>' . number_format($bill->jobs->sum('extra_port_charges_total'), 2) . '</td></tr>
-            <tr><td align="left">Detention Charges</td><td>' . number_format($bill->jobs->sum('detention_total'), 2) . '</td></tr>
+            <tr><td width="80%" align="left">Rent</td><td width="20%">' . number_format($bill->jobs->sum(fn ($job) => $job->rent * $chargeMultiplier($job)), 2) . '</td></tr>
+            <tr><td align="left">Labour Charges</td><td>' . number_format($bill->jobs->sum(fn ($job) => $job->labour_charges * $chargeMultiplier($job)), 2) . '</td></tr>
+            <tr><td align="left">Yard Charges</td><td>' . number_format($bill->jobs->sum(fn ($job) => $job->yard_charges * $chargeMultiplier($job)), 2) . '</td></tr>
+            <tr><td align="left">Weight Bridge (Kanta)</td><td>' . number_format($bill->jobs->sum(fn ($job) => $job->kanta_charges * $chargeMultiplier($job)), 2) . '</td></tr>
+            <tr><td align="left">Extra Port Charges</td><td>' . number_format($bill->jobs->sum(fn ($job) => $job->extra_port_charges_total * $chargeMultiplier($job)), 2) . '</td></tr>
+            <tr><td align="left">Detention Charges</td><td>' . number_format($bill->jobs->sum('detention_charges_total'), 2) . '</td></tr>
         </table>';
         $pdf->writeHTML($breakdownHtml, true, false, true, false, '');
         $pdf->Ln(4);

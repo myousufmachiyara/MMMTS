@@ -98,6 +98,7 @@ class InvoiceController extends Controller
                 'bill_ids.*'    => 'exists:bills,id',
                 'is_taxable'    => 'nullable|boolean',
                 'tax_percent'   => 'nullable|required_if:is_taxable,1|numeric|min:0|max:100',
+                'customer_tax_share_percent' => 'nullable|numeric|min:0|max:100',
                 'remarks'       => 'nullable|string|max:1000',
             ]);
 
@@ -121,14 +122,34 @@ class InvoiceController extends Controller
                 // up), not just the old Trip Plan portion. Trip Plan no
                 // longer carries its own charges anyway (item 2), so basing
                 // tax on it would previously have zeroed the tax out.
+                //
+                // Item 2 (round 3) — "Sale tax 20% paid by customer, 80% by
+                // company". tax_amount is still the FULL, true sales tax
+                // liability (unchanged formula) — what's NEW is that only
+                // customerTaxShare% of it is actually billed to the
+                // customer; the rest is a cost the company absorbs itself
+                // rather than passing on. total_amount below is built from
+                // customerTaxAmount now, not the full taxAmount.
                 $taxAmount = $isTaxable ? round($billsSubtotal * $taxPct / 100, 2) : 0;
-                $total     = round($billsSubtotal + $taxAmount, 2);
+                $customerTaxSharePct = $isTaxable ? (float) ($data['customer_tax_share_percent'] ?? 20) : null;
+                $customerTaxAmount = $isTaxable ? round($taxAmount * $customerTaxSharePct / 100, 2) : 0;
+                $companyTaxAmount  = $isTaxable ? round($taxAmount - $customerTaxAmount, 2) : 0;
+                $total     = round($billsSubtotal + $customerTaxAmount, 2);
                 $totalContainers = (int) $bills->sum(fn ($bill) => $bill->jobs()->count());
 
-                // Auto-post the tax portion only: Dr Customer / Cr Sales Tax Payable.
-                // (The bills' own revenue recognition was already posted when each was created.)
+                // Auto-post only the CUSTOMER's share: Dr Customer / Cr Sales
+                // Tax Payable. (The bills' own revenue recognition was
+                // already posted when each was created.) The company's own
+                // companyTaxAmount share above is stored on the invoice for
+                // visibility/reporting, but is deliberately NOT auto-posted
+                // anywhere yet — there's no designated expense account for
+                // "sales tax absorbed by the company" in the chart of
+                // accounts today, and inventing one silently here felt like
+                // the wrong call for a real ledger posting. Post that 80%
+                // manually via a Journal Voucher for now, or tell me which
+                // account it should hit and I'll wire it up automatically.
                 $voucher = null;
-                if ($taxAmount > 0) {
+                if ($customerTaxAmount > 0) {
                     $taxAccountId = $this->taxPayableAccountId();
                     if ($taxAccountId) {
                         $voucher = Voucher::create([
@@ -136,7 +157,7 @@ class InvoiceController extends Controller
                             'date'         => $data['invoice_date'],
                             'ac_dr_sid'    => $data['customer_id'],
                             'ac_cr_sid'    => $taxAccountId,
-                            'amount'       => $taxAmount,
+                            'amount'       => $customerTaxAmount,
                             'reference'    => null, // invoice_no not known yet — set once the invoice exists
                         ]);
                     }
@@ -150,8 +171,11 @@ class InvoiceController extends Controller
                     'to_date'            => $data['to_date'],
                     'is_taxable'         => $isTaxable,
                     'tax_percent'        => $isTaxable ? $taxPct : null,
+                    'customer_tax_share_percent' => $customerTaxSharePct,
                     'trip_plan_subtotal' => $tripPlanSubtotal,
                     'tax_amount'         => $taxAmount,
+                    'customer_tax_amount' => $customerTaxAmount,
+                    'company_tax_amount' => $companyTaxAmount,
                     'total_containers'   => $totalContainers,
                     'total_amount'       => $total,
                     'paid_amount'        => 0,
@@ -165,7 +189,7 @@ class InvoiceController extends Controller
                 if ($voucher) {
                     $voucher->update([
                         'reference' => $invoice->invoice_no,
-                        'remarks'   => "Sales tax on Invoice {$invoice->invoice_no}",
+                        'remarks'   => "Sales tax (customer's share) on Invoice {$invoice->invoice_no}",
                     ]);
                 }
 
@@ -330,13 +354,31 @@ class InvoiceController extends Controller
                 <td align="right">' . number_format($invoice->total_amount - $invoice->tax_amount, 2) . '</td>
             </tr>';
 
-        $grandTotalBeforeTax = $invoice->total_amount - $invoice->tax_amount;
+        // Item 2 (round 3) — grand-total-before-tax is now derived from
+        // customer_tax_amount (what actually landed in total_amount), not
+        // the full tax_amount — see InvoiceController::store().
+        $grandTotalBeforeTax = $invoice->total_amount - $invoice->customer_tax_amount;
+
+        $html .= '
+            <tr style="background-color:#f5f5f5;">
+                <td colspan="4" align="right">Subtotal (Bills)</td>
+                <td align="right">' . number_format($grandTotalBeforeTax, 2) . '</td>
+            </tr>';
 
         if ($invoice->is_taxable) {
+            $customerSharePct = rtrim(rtrim(number_format($invoice->customer_tax_share_percent ?? 20, 2), '0'), '.');
             $html .= '
             <tr>
                 <td colspan="4" align="right">Sales Tax (' . rtrim(rtrim(number_format($invoice->tax_percent, 2), '0'), '.') . '% on Grand Total of ' . number_format($grandTotalBeforeTax, 2) . ')</td>
                 <td align="right">' . number_format($invoice->tax_amount, 2) . '</td>
+            </tr>
+            <tr>
+                <td colspan="4" align="right">Less: Company-Absorbed Portion (' . (100 - (float) ($invoice->customer_tax_share_percent ?? 20)) . '% of Sales Tax)</td>
+                <td align="right">(' . number_format($invoice->company_tax_amount, 2) . ')</td>
+            </tr>
+            <tr>
+                <td colspan="4" align="right">Net Sales Tax Payable by Customer (' . $customerSharePct . '%)</td>
+                <td align="right">' . number_format($invoice->customer_tax_amount, 2) . '</td>
             </tr>';
         }
 
@@ -356,7 +398,10 @@ class InvoiceController extends Controller
         // Item 14 — explicit tax-inclusive/exclusive statement on print.
         $pdf->SetFont('helvetica', 'I', 8);
         $taxStatement = $invoice->is_taxable
-            ? ('Amounts above are exclusive of Sales Tax; Sales Tax of ' . rtrim(rtrim(number_format($invoice->tax_percent, 2), '0'), '.') . '% has been added separately as shown above.')
+            // Item 2 (round 3) — make the split explicit on print, not just
+            // the net figure, since the customer is only being charged part
+            // of the calculated tax.
+            ? ('Amounts above are exclusive of Sales Tax; Sales Tax of ' . rtrim(rtrim(number_format($invoice->tax_percent, 2), '0'), '.') . '% has been calculated and split per agreement — ' . rtrim(rtrim(number_format($invoice->customer_tax_share_percent ?? 20, 2), '0'), '.') . '% payable by the customer (added above) and the remainder absorbed by the company.')
             : 'This invoice does not include Sales Tax.';
         $pdf->Cell(0, 5, $taxStatement, 0, 1, 'L');
         $pdf->SetFont('helvetica', '', 10);

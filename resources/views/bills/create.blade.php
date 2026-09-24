@@ -161,7 +161,11 @@ document.getElementById('getJobsBtn').addEventListener('click', function() {
                 '<td>' + j.route + '</td>' +
                 '<td class="text-end" data-detention="' + j.detention_charges_total + '">' + fmt(j.detention_charges_total) + '</td>' +
                 '<td class="text-end" data-other="' + j.other_charges_total + '">' + fmt(j.other_charges_total) + '</td>' +
-                '<td class="text-end">' + fmt(j.job_total) + '</td>';
+                // Item 3 (round 3) — j.job_total already reflects the
+                // ×vehicle-count multiplier (see BillController::getJobs());
+                // the "×N" suffix just explains why it no longer matches the
+                // raw rate entered on the job form for a multi-vehicle job.
+                '<td class="text-end">' + fmt(j.job_total) + (j.vehicle_count > 1 ? ' <small class="text-muted">(&times;' + j.vehicle_count + ')</small>' : '') + '</td>';
             tbody.appendChild(tr);
         });
 

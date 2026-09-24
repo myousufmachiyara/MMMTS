@@ -75,13 +75,16 @@
         'detention_next_day_rate'     => $job->detention_next_day_rate ?: ($firstLine->detention_next_day_rate ?? 0),
         'detention_extra_days'        => $job->detention_extra_days ?: ($firstLine->detention_extra_days ?? 0),
         'detention_night_rate'        => $job->detention_night_rate ?: ($firstLine->detention_night_rate ?? 0),
+        // Item 1 (round 3) — job-level only, nothing to fall back to on
+        // $firstLine (vehicle-rows never carried their own detention date).
+        'detention_date'              => optional($job->detention_date)->format('Y-m-d'),
         'extra_port'                  => $job->sharedExtraPortCharges->map(fn ($ep) => ['port_id' => $ep->port_id, 'charges' => $ep->charges])->values(),
     ] : [
         'route_id' => null, 'item_description' => null, 'trip_type' => 'one_way',
         'pickup_port_id' => null, 'destination_location_id' => null, 'dropoff_port_id' => null,
         'rent' => 0, 'labour_charges' => 0, 'yard_charges' => 0, 'kanta_charges' => 0,
         'detention_first_day_charges' => 0, 'detention_next_day_rate' => 0,
-        'detention_extra_days' => 0, 'detention_night_rate' => 0,
+        'detention_extra_days' => 0, 'detention_night_rate' => 0, 'detention_date' => null,
         'extra_port' => [],
     ];
 @endphp
@@ -344,6 +347,7 @@ function renderRateFields() {
         '<div class="col-lg-2 mb-2"><label>Extra Days</label><input type="number" step="1" min="0" class="form-control" id="detention_days" name="detention_extra_days" value="' + (row.detention_extra_days || 0) + '" oninput="recalcTotal()"></div>' +
         '<div class="col-lg-2 mb-2"><label>Night Rate</label><input type="number" step="any" class="form-control" id="detention_night" name="detention_night_rate" value="' + (row.detention_night_rate || 0) + '" oninput="recalcTotal()"></div>' +
         '<div class="col-lg-3 mb-2"><label>Detention Total</label><input type="text" class="form-control" id="detention_total_display" readonly value="0.00"></div>' +
+        '<div class="col-lg-3 mb-2"><label>Detention Date</label><input type="date" class="form-control" id="detention_date" name="detention_date" value="' + (row.detention_date || '') + '"></div>' +
     '</div>' +
     '<div class="mb-2">' +
         '<div class="d-flex justify-content-between align-items-center">' +

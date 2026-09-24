@@ -260,11 +260,10 @@ class FleetReportController extends Controller
             ->get()
             ->each(function ($job) use (&$lines) {
                 $vehicleLines = $job->vehicles->filter(fn ($l) => $l->vehicle_id);
-                $count = $vehicleLines->count();
-                if ($count === 0) {
+                if ($vehicleLines->isEmpty()) {
                     return;
                 }
-                $share = round($job->job_total / $count, 2);
+                $share = round((float) $job->job_total, 2);
 
                 foreach ($vehicleLines as $line) {
                     $lines->push([
@@ -326,11 +325,10 @@ class FleetReportController extends Controller
             ->get()
             ->each(function ($job) use (&$amounts, &$names) {
                 $vehicleLines = $job->vehicles->filter(fn ($l) => $l->vehicle_id);
-                $vCount = $vehicleLines->count();
-                if ($vCount === 0) {
+                if ($vehicleLines->isEmpty()) {
                     return;
                 }
-                $vehicleShare = $job->job_total / $vCount;
+                $vehicleShare = (float) $job->job_total;
 
                 foreach ($vehicleLines as $line) {
                     $companies = $line->vehicle?->companies ?? collect();
@@ -399,12 +397,16 @@ class FleetReportController extends Controller
                 return [
                     'customer'        => $customer->name ?? '—',
                     'job_count'       => $jobs->count(),
-                    // FIX — was reading the legacy singular vehicle relation.
                     'vehicles_used'   => $this->distinctVehicleCount($jobs),
                     'routes_used'     => $jobs->where('job_type', 'direct')->pluck('route.name')->filter()->unique()->count(),
-                    'total_amount'    => round($jobs->sum('job_total'), 2),
-                    'billed_amount'   => round($jobs->whereNotNull('bill_id')->sum('job_total'), 2),
-                    'unbilled_amount' => round($jobs->whereNull('bill_id')->sum('job_total'), 2),
+                    // Item 3 (round 3) — other_charges_total already embeds
+                    // the ×vehicle-count multiplier for Direct jobs (and
+                    // equals job_total unchanged for Party-to-Party), so
+                    // these now reflect what's actually billed rather than
+                    // the raw, un-multiplied rate.
+                    'total_amount'    => round($jobs->sum('other_charges_total'), 2),
+                    'billed_amount'   => round($jobs->whereNotNull('bill_id')->sum('other_charges_total'), 2),
+                    'unbilled_amount' => round($jobs->whereNull('bill_id')->sum('other_charges_total'), 2),
                 ];
             })
             ->sortByDesc('total_amount')
@@ -451,10 +453,10 @@ class FleetReportController extends Controller
                 return [
                     'route'        => $route->name ?? '—',
                     'trip_count'   => $jobs->count(),
-                    // FIX — was reading the legacy singular vehicle relation.
                     'vehicles_used' => $this->distinctVehicleCount($jobs),
                     'customers'    => $jobs->pluck('customer.name')->filter()->unique()->count(),
-                    'total_amount' => round($jobs->sum('job_total'), 2),
+                    // Item 3 (round 3) — see customerWise()'s note above.
+                    'total_amount' => round($jobs->sum('other_charges_total'), 2),
                 ];
             })
             ->sortByDesc('trip_count')
@@ -476,7 +478,8 @@ class FleetReportController extends Controller
                     return [
                         'route'      => $route->name ?? '—',
                         'trip_count' => $routeJobs->count(),
-                        'total_amount' => round($routeJobs->sum('job_total'), 2),
+                        // Item 3 (round 3) — see customerWise()'s note above.
+                        'total_amount' => round($routeJobs->sum('other_charges_total'), 2),
                     ];
                 })->sortByDesc('trip_count')->values();
 

@@ -125,6 +125,7 @@ class DailyJobController extends Controller
             'detention_next_day_rate'     => 'nullable|numeric|min:0',
             'detention_extra_days'        => 'nullable|integer|min:0',
             'detention_night_rate'        => 'nullable|numeric|min:0',
+            'detention_date'              => 'nullable|date',
 
             'extra_port'                  => 'nullable|array',
             'extra_port.*.port_id'        => 'nullable|exists:ports,id',
@@ -238,6 +239,7 @@ class DailyJobController extends Controller
                     'detention_extra_days'        => $extraDays,
                     'detention_night_rate'        => $nightRate,
                     'detention_total'             => $detentionTotal,
+                    'detention_date'              => $data['detention_date'] ?? null,
                     'extra_port_charges_total'    => $extraTotal,
                 ];
             } elseif ($job) {
@@ -259,6 +261,7 @@ class DailyJobController extends Controller
                     'detention_extra_days'        => $job->detention_extra_days,
                     'detention_night_rate'        => $job->detention_night_rate,
                     'detention_total'             => $job->detention_total,
+                    'detention_date'              => $job->detention_date,
                     'extra_port_charges_total'    => $job->extra_port_charges_total,
                 ];
                 $jobTotal = $job->job_total;
@@ -279,6 +282,7 @@ class DailyJobController extends Controller
                     'detention_extra_days'        => 0,
                     'detention_night_rate'        => 0,
                     'detention_total'             => 0,
+                    'detention_date'              => null,
                     'extra_port_charges_total'    => 0,
                 ];
                 $jobTotal = 0;

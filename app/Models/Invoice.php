@@ -18,8 +18,16 @@ class Invoice extends Model
         'to_date',
         'is_taxable',
         'tax_percent',
+        // Item 2 (round 3) — "Sale tax 20% paid by customer, 80% by
+        // company": tax_amount below is still the FULL, true sales tax
+        // liability (calculated at tax_percent) — these two split WHO pays
+        // it. See the 2026_09_19_073500 migration and
+        // InvoiceController::store()/print().
+        'customer_tax_share_percent',
         'trip_plan_subtotal',
         'tax_amount',
+        'customer_tax_amount',
+        'company_tax_amount',
         'total_containers',
         'total_amount',
         'paid_amount',

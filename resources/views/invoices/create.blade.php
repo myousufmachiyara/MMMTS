@@ -95,10 +95,20 @@
           <label>Tax %</label>
           <input type="number" step="any" name="tax_percent" id="tax_percent" class="form-control" value="18">
         </div>
+        {{-- Item 2 (round 3) — "Sale tax 20% paid by customer, 80% by
+             company": what % of the calculated tax is actually billed to
+             the customer; the rest is absorbed by the company (see
+             InvoiceController::store()). --}}
+        <div class="col-lg-2 mb-2" id="customerTaxShareWrap" style="display:none;">
+          <label>Customer's Share of Tax %</label>
+          <input type="number" step="any" min="0" max="100" name="customer_tax_share_percent" id="customer_tax_share_percent" class="form-control" value="20">
+        </div>
       </div>
       <table class="table table-borderless w-auto ms-auto mt-2 mb-0">
         <tr><td class="text-end pe-3">Bills Subtotal (Grand Total, tax base):</td><td class="text-end" id="sumBills">0.00</td></tr>
-        <tr><td class="text-end pe-3">Tax Amount:</td><td class="text-end" id="sumTax">0.00</td></tr>
+        <tr><td class="text-end pe-3">Sales Tax (full amount):</td><td class="text-end" id="sumTax">0.00</td></tr>
+        <tr><td class="text-end pe-3">Less: Company-Absorbed Portion:</td><td class="text-end" id="sumCompanyTax">0.00</td></tr>
+        <tr><td class="text-end pe-3">Net Sales Tax Payable by Customer:</td><td class="text-end" id="sumCustomerTax">0.00</td></tr>
         <tr class="fw-bold"><td class="text-end pe-3">Total Invoice Amount:</td><td class="text-end" id="sumTotal">0.00</td></tr>
         <tr><td class="text-end pe-3">Total Containers:</td><td class="text-end" id="sumContainers">0</td></tr>
       </table>
@@ -174,10 +184,12 @@ document.getElementById('billsPickBody').addEventListener('change', function(e) 
 function toggleTaxField() {
     var isTaxable = document.getElementById('is_taxable').value === '1';
     document.getElementById('taxPercentWrap').style.display = isTaxable ? '' : 'none';
+    document.getElementById('customerTaxShareWrap').style.display = isTaxable ? '' : 'none';
     recalcTotal();
 }
 document.getElementById('is_taxable').addEventListener('change', toggleTaxField);
 document.getElementById('tax_percent').addEventListener('input', recalcTotal);
+document.getElementById('customer_tax_share_percent').addEventListener('input', recalcTotal);
 
 function recalcTotal() {
     var billsSum = 0, containers = 0;
@@ -187,17 +199,26 @@ function recalcTotal() {
     });
     var isTaxable = document.getElementById('is_taxable').value === '1';
     var taxPct = parseFloat(document.getElementById('tax_percent').value) || 0;
+    // Item 2 (round 3) — "Sale tax 20% paid by customer, 80% by company":
+    // taxAmount is still the full liability; only customerSharePct of it
+    // actually lands in the invoice total below.
+    var customerSharePct = parseFloat(document.getElementById('customer_tax_share_percent').value);
+    if (isNaN(customerSharePct)) customerSharePct = 20;
     // Item 13 — tax applies to the grand total being invoiced (billsSum),
     // not just a Trip Plan portion (Trip Plan carries no charges any more).
     var taxAmount = isTaxable ? (billsSum * taxPct / 100) : 0;
-    var total = billsSum + taxAmount;
+    var customerTaxAmount = isTaxable ? (taxAmount * customerSharePct / 100) : 0;
+    var companyTaxAmount = isTaxable ? (taxAmount - customerTaxAmount) : 0;
+    var total = billsSum + customerTaxAmount;
 
     document.getElementById('sumBills').textContent = fmt(billsSum);
     document.getElementById('sumTax').textContent = fmt(taxAmount);
+    document.getElementById('sumCompanyTax').textContent = fmt(companyTaxAmount);
+    document.getElementById('sumCustomerTax').textContent = fmt(customerTaxAmount);
     document.getElementById('sumTotal').textContent = fmt(total);
     document.getElementById('sumContainers').textContent = containers;
     document.getElementById('taxNote').textContent = isTaxable
-        ? ('Sales Tax of ' + (taxPct || 0) + '% will be added on top of the grand total above.')
+        ? ('Sales Tax of ' + (taxPct || 0) + '% is calculated on the grand total above; only ' + customerSharePct + '% of it (' + fmt(customerTaxAmount) + ') is billed to the customer, the rest is absorbed by the company.')
         : 'This invoice will not include Sales Tax.';
 }
 
