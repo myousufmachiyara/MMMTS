@@ -208,6 +208,14 @@
                     <label><strong>Job Grand Total</strong></label>
                     <input type="text" class="form-control fw-bold" id="job_total" readonly value="0.00">
                     <small class="text-muted">Tax (if any) is applied on this grand total at Invoice stage.</small>
+                    {{-- Item 3 (round 3) follow-up — this preview is informational
+                         only (the input above has no name="", so it's never
+                         submitted; the server always recomputes the real total
+                         itself). Shows the ×vehicle-count breakdown so it's
+                         obvious why the total isn't just the raw rate fields
+                         added up, matching how the Bill picker/print already
+                         display it (see BillController). --}}
+                    <small class="text-muted d-block" id="vehicleMultiplierNote"></small>
                 </div>
             </div>
         </div>
@@ -280,6 +288,20 @@ function filterDestinationOptions(customerId, selectedId) {
     $sel.trigger('change');
 }
 
+// Item 3 (round 3) follow-up — mirrors DailyJob::billableVehicleCount() on
+// the backend: counts vehicle rows that actually have a vehicle selected
+// (a brand-new row added but not yet assigned shouldn't inflate the
+// preview), floored at 1 so the preview never shows zero before any
+// vehicle has been picked.
+function vehicleCount() {
+    var count = 0;
+    document.querySelectorAll('#vehicleRows > tr').forEach(function(tr) {
+        var sel = tr.querySelector('select[name$="[vehicle_id]"]');
+        if (sel && sel.value) count++;
+    });
+    return Math.max(count, 1);
+}
+
 function recalcTotal() {
     var num = function(id) { var el = document.getElementById(id); return el ? (parseFloat(el.value) || 0) : 0; };
 
@@ -299,8 +321,23 @@ function recalcTotal() {
     document.querySelectorAll('.extra-port-calc').forEach(function(el) { extraPortTotal += (parseFloat(el.value) || 0); });
 
     var rent = num('rent'), labour = num('labour'), yard = num('yard'), kanta = num('kanta');
-    var jobTotal = rent + labour + yard + kanta + detentionTotal + extraPortTotal;
+    // Item 3 (round 3) follow-up — this preview used to stop here, showing
+    // only the once-entered rate total even when the job has several
+    // vehicles. The REAL bill amount multiplies by how many vehicles are on
+    // the job (see DailyJob::getOtherChargesTotalAttribute()), so the
+    // preview needs to do the same or it quietly undersells what Save will
+    // actually bill once a Bill is created from this job.
+    var perVehicleTotal = rent + labour + yard + kanta + detentionTotal + extraPortTotal;
+    var vCount = vehicleCount();
+    var jobTotal = perVehicleTotal * vCount;
     document.getElementById('job_total').value = fmt(jobTotal);
+
+    var noteEl = document.getElementById('vehicleMultiplierNote');
+    if (noteEl) {
+        noteEl.textContent = vCount > 1
+            ? (fmt(perVehicleTotal) + ' per vehicle × ' + vCount + ' vehicles')
+            : '';
+    }
 }
 
 function renderRateFields() {
@@ -347,6 +384,8 @@ function renderRateFields() {
         '<div class="col-lg-2 mb-2"><label>Extra Days</label><input type="number" step="1" min="0" class="form-control" id="detention_days" name="detention_extra_days" value="' + (row.detention_extra_days || 0) + '" oninput="recalcTotal()"></div>' +
         '<div class="col-lg-2 mb-2"><label>Night Rate</label><input type="number" step="any" class="form-control" id="detention_night" name="detention_night_rate" value="' + (row.detention_night_rate || 0) + '" oninput="recalcTotal()"></div>' +
         '<div class="col-lg-3 mb-2"><label>Detention Total</label><input type="text" class="form-control" id="detention_total_display" readonly value="0.00"></div>' +
+        // Item 1 (round 3) — a single, optional date alongside the charge
+        // fields above; shared once across the job like they are.
         '<div class="col-lg-3 mb-2"><label>Detention Date</label><input type="date" class="form-control" id="detention_date" name="detention_date" value="' + (row.detention_date || '') + '"></div>' +
     '</div>' +
     '<div class="mb-2">' +
@@ -496,12 +535,22 @@ function addVehicleRow(row) {
         refreshAllDcDropdowns(vi);
     });
 
+    // Item 3 (round 3) follow-up — the Job Grand Total preview multiplies
+    // by how many vehicle rows have an actual vehicle selected, so it has
+    // to be recalculated whenever this row's own selection changes (not
+    // just when the row is first added/removed below).
+    $(tr).find('select[name$="[vehicle_id]"]').on('change', function() { recalcTotal(); });
+
     refreshDcDropdown(vi, row.delivery_challan_id, row.delivery_challan_label);
 
     // Item 2/3 — auto-fill from whichever DC this row already has (its own
     // saved link, or the pendingDc seeded in below on a fresh row) as soon
     // as the row exists, not just on a later manual re-selection.
     if (row.delivery_challan_id) onDcSelected(vi, row.delivery_challan_id);
+
+    // Item 3 (round 3) follow-up — a row being added changes the vehicle
+    // count the preview multiplies by.
+    recalcTotal();
 }
 
 function renumberVehicleRows() {
@@ -525,6 +574,8 @@ document.getElementById('vehicleRows').addEventListener('click', function(e) {
         // Item 2 (round 2) — the removed row may have been holding a DC
         // that should now be offered to everyone else again.
         refreshAllDcDropdowns();
+        // Item 3 (round 3) follow-up — one fewer vehicle to multiply by.
+        recalcTotal();
     }
 });
 
