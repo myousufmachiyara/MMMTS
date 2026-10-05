@@ -295,7 +295,7 @@ class DeliveryChallanController extends Controller
         $pdf->setPrintFooter(false);
         $pdf->SetCreator('MMMTS');
         $pdf->SetAuthor('M M Logistics');
-        $pdf->SetTitle('Delivery Challan ' . $dc->dc_no);
+        $pdf->SetTitle($dc->dc_no);
         $pdf->SetMargins(10, 10, 10);
         $pdf->setCellPadding(1.5);
         $pdf->SetAutoPageBreak(false, 0);
