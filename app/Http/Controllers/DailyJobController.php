@@ -579,15 +579,6 @@ class DailyJobController extends Controller
         $pdf->AddPage();
         $pdf->setCellPadding(1.5);
 
-        $logoPath = public_path('assets/img/logo.png');
-        if (file_exists($logoPath)) {
-            $pdf->Image($logoPath, 12, 8, 35);
-        }
-
-        $pdf->SetFont('helvetica', 'B', 14);
-        $pdf->SetXY(120, 12);
-        $pdf->Cell(80, 8, 'JOB SLIP', 0, 1, 'R');
-
         $yOffset = 12;
 
         $pdf->SetFont('helvetica', 'B', 16);
