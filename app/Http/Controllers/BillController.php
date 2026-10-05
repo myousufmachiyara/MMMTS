@@ -333,11 +333,11 @@ class BillController extends Controller
         $infoHtml = '
         <table cellpadding="3" cellspacing="0" width="100%">
             <tr>
-                <td width="60%">
+                <td width="50%">
                     <b>' . e($bill->customer->name ?? '') . '</b><br>
                     ' . e($bill->customer->address ?? '') . '
                 </td>
-                <td width="40%">
+                <td width="50%">
                     <table border="1" cellpadding="4" cellspacing="0" style="font-size:10px;">
                         <tr><td width="40%"><b>Bill No.</b></td><td width="60%">' . e($bill->bill_no) . '</td></tr>
                         <tr><td width="40%"><b>Bill Date</b></td><td width="60%">' . $bill->bill_date->format('d-m-Y') . '</td></tr>
