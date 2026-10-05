@@ -60,12 +60,6 @@ class Bill extends Model
         return $this->hasMany(DailyJob::class);
     }
 
-    // Total containers/entries on this bill (1 job row = 1 container per the legacy sheet convention)
-    public function getContainerCountAttribute(): int
-    {
-        return $this->jobs()->count();
-    }
-
     public function voucher()
     {
         return $this->belongsTo(Voucher::class);
@@ -74,5 +68,12 @@ class Bill extends Model
     public function invoice()
     {
         return $this->belongsTo(Invoice::class);
+    }
+
+    public function getContainerCountAttribute(): int
+    {
+        $jobs = $this->relationLoaded('jobs') ? $this->jobs : $this->jobs()->with('vehicles')->get();
+
+        return (int) $jobs->sum(fn ($job) => $job->billableVehicleCount());
     }
 }

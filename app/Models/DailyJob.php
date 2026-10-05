@@ -233,18 +233,7 @@ class DailyJob extends Model
     // Prefers the already-loaded vehicles relation (every report/controller
     // that reads this already eager-loads 'vehicles...') to avoid N+1; falls
     // back to a fresh count only when it genuinely isn't loaded.
-    private function billableVehicleCount(): int
-    {
-        if ($this->job_type === 'party_to_party') {
-            return 1;
-        }
 
-        $count = $this->relationLoaded('vehicles')
-            ? $this->vehicles->filter(fn ($v) => $v->vehicle_id)->count()
-            : $this->vehicles()->whereNotNull('vehicle_id')->count();
-
-        return max($count, 1);
-    }
 
     // "Other charges" = everything except the Trip Plan portion. Trip Plan
     // no longer carries any charges of its own (item 2) — tax is applied to
@@ -257,17 +246,7 @@ class DailyJob extends Model
     // amount billed to the customer (pty_sale_amount — NOT pty_cost, which
     // is what we owe the vendor) is carried entirely as "other charges" here,
     // unmultiplied (billableVehicleCount() is always 1 for these).
-    public function getOtherChargesTotalAttribute()
-    {
-        if ($this->job_type === 'party_to_party') {
-            return round((float) $this->pty_sale_amount, 2);
-        }
 
-        $perVehicle = (float) $this->rent + (float) $this->labour_charges + (float) $this->yard_charges
-            + (float) $this->kanta_charges + (float) $this->detention_total + (float) $this->extra_port_charges_total;
-
-        return round($perVehicle * $this->billableVehicleCount(), 2);
-    }
 
     // Item 3 (round 3) — a clearer name than "other charges" to reach for at
     // billing call sites (BillController, FleetReportController): the
@@ -292,5 +271,40 @@ class DailyJob extends Model
         }
 
         return round((float) $this->detention_total * $this->billableVehicleCount(), 2);
+    }
+
+    public function billableVehicleCount(): int
+    {
+        if ($this->job_type === 'party_to_party') {
+            return 1;
+        }
+
+        $count = $this->relationLoaded('vehicles')
+            ? $this->vehicles->filter(fn ($v) => $v->vehicle_id)->count()
+            : $this->vehicles()->whereNotNull('vehicle_id')->count();
+
+        return max($count, 1);
+    }
+
+    public function getOtherChargesTotalAttribute()
+    {
+        return round($this->other_charges_per_vehicle * $this->billableVehicleCount(), 2);
+    }
+
+    // The same figure as other_charges_total above, but for ONE vehicle —
+    // i.e. before the ×vehicle-count multiplier. This is what the Bill print
+    // shows as "charges per vehicle" next to the vehicle count and the total.
+    // (Party-to-Party jobs have a single sale amount and are never multiplied.)
+    public function getOtherChargesPerVehicleAttribute()
+    {
+        if ($this->job_type === 'party_to_party') {
+            return round((float) $this->pty_sale_amount, 2);
+        }
+
+        return round(
+            (float) $this->rent + (float) $this->labour_charges + (float) $this->yard_charges
+            + (float) $this->kanta_charges + (float) $this->detention_total + (float) $this->extra_port_charges_total,
+            2
+        );
     }
 }
