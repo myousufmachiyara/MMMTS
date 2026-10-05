@@ -605,11 +605,11 @@ class DailyJobController extends Controller
         $infoHtml = '
         <table cellpadding="3" cellspacing="0" width="100%">
             <tr>
-                <td width="60%">
+                <td width="40%">
                     <b>' . e($job->customer->name ?? '') . '</b><br>
                     ' . e($job->customer->address ?? '') . '
                 </td>
-                <td width="40%">
+                <td width="60%">
                     <table border="1" cellpadding="4" cellspacing="0" style="font-size:10px;">
                         <tr><td width="40%"><b>Job No.</b></td><td width="60%">' . e($job->job_no) . e($statusLabel) . '</td></tr>
                         <tr><td width="40%"><b>Date</b></td><td width="60%">' . $job->date->format('d-m-Y') . '</td></tr>
