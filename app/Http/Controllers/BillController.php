@@ -352,8 +352,8 @@ class BillController extends Controller
         $html = '<table border="0.3" cellpadding="4" style="text-align:center;font-size:10px;">
             <tr style="background-color:#f5f5f5; font-weight:bold;">
                 <th width="6%">S.No</th>
-                <th width="16%">Job No.</th>
-                <th width="10%">Date</th>
+                <th width="14%">Job No.</th>
+                <th width="12%">Date</th>
                 <th width="17%">Vehicle / Vendor</th>
                 <th width="17%">Route / Destination</th>
                 <th width="12%">Detention Charges</th>
