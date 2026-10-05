@@ -588,6 +588,22 @@ class DailyJobController extends Controller
         $pdf->SetXY(120, 12);
         $pdf->Cell(80, 8, 'JOB SLIP', 0, 1, 'R');
 
+        $pdf->SetFont('helvetica', 'B', 16);
+        $pdf->SetXY(10, $yOffset + 10);
+        $pdf->Cell(0, 7, 'M M LOGISTICS', 0, 1, 'L');
+        $pdf->SetFont('helvetica', '', 9);
+        $pdf->SetXY(10, $yOffset + 17);
+        $pdf->Cell(0, 5, 'Room No 301, 303, 305, 307, 3rd Floor, Custom Trade Tower,', 0, 1, 'L');
+        $pdf->SetXY(10, $yOffset + 22);
+        $pdf->Cell(0, 5, 'KPT Stadium, Kharadar, Karachi', 0, 1, 'L');
+
+        $pdf->SetFont('helvetica', 'B', 14);
+        $pdf->SetXY(140, $yOffset + 10);
+        $pdf->Cell(60, 6, 'DELIVERY CHALLAN', 0, 1, 'R');
+        $pdf->SetFont('helvetica', 'B', 10);
+        $pdf->SetXY(140, $yOffset + 17);
+        $pdf->Cell(60, 6, $copyLabel, 0, 1, 'R');
+
         $pdf->Ln(5);
         $pdf->SetFont('helvetica', '', 10);
 
@@ -689,7 +705,7 @@ class DailyJobController extends Controller
             foreach ($job->vehicles as $i => $line) {
                 $vehHtml .= '<tr>
                     <td>' . ($i + 1) . '</td>
-                    <td>' . e($line->vehicle->name ?? '') . ' (' . e($line->vehicle->vehicle_no ?? '') . ')</td>
+                    <td>' . e($line->vehicle->name ?? '') . '</td>
                     <td>' . e($line->container_no ?? '—') . '</td>
                     <td>' . e($line->deliveryChallan->dc_no ?? '—') . '</td>
                 </tr>';
