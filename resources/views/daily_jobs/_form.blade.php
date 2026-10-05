@@ -422,7 +422,12 @@ function selectedDcIdsExcept(excludeVi) {
         var vi = tr.id.replace('vehicleRow_', '');
         if (String(vi) === String(excludeVi)) return;
         var el = document.getElementById('dc_select_' + vi);
-        if (el && el.value) ids.push(String(el.value));
+        if (!el) return;
+        // Prefer the row's remembered selection over el.value: a row whose
+        // dropdown is still being (re)loaded has no real option selected yet.
+        var sel = $(el).data('dcSel');
+        if (sel === undefined) sel = el.value;
+        if (sel) ids.push(String(sel));
     });
     return ids;
 }
@@ -437,7 +442,15 @@ function refreshAllDcDropdowns(exceptVi) {
         var vi = tr.id.replace('vehicleRow_', '');
         if (exceptVi !== undefined && exceptVi !== null && String(vi) === String(exceptVi)) return;
         var $s = $('#dc_select_' + vi);
-        if ($s.length) refreshDcDropdown(vi, $s.val(), null);
+        if (!$s.length) return;
+        // Use the row's REMEMBERED selection (and its label), not $s.val():
+        // a DC that's already saved against this job's vehicle isn't in the
+        // "unlinked" list at all, so it only survives a re-render if its
+        // label is passed along — and on page load a row's own first fetch
+        // may not have come back yet, so $s.val() can still be empty.
+        var sel = $s.data('dcSel');
+        if (sel === undefined) sel = $s.val();
+        refreshDcDropdown(vi, sel, $s.data('dcLabel') || null);
     });
 }
 
@@ -450,6 +463,13 @@ function refreshDcDropdown(vi, selectedId, selectedLabel) {
     var $sel = $('#dc_select_' + vi);
     if (!$sel.length) return;
 
+    // Only the most recent refresh for this dropdown may render. Several can
+    // be in flight at once (page load, then a refresh when a sibling row
+    // changes); without this, a slower, older response could overwrite a
+    // newer one and drop the row's selection.
+    var reqToken = ($sel.data('dcReq') || 0) + 1;
+    $sel.data('dcReq', reqToken);
+
     var params = [];
     if (customerId) params.push('customer_id=' + encodeURIComponent(customerId));
     if (currentJobId) params.push('job_id=' + encodeURIComponent(currentJobId));
@@ -457,6 +477,7 @@ function refreshDcDropdown(vi, selectedId, selectedLabel) {
     fetch(url, { headers: { 'Accept': 'application/json' } })
         .then(function(res) { return res.json(); })
         .then(function(list) {
+            if ($sel.data('dcReq') !== reqToken) return; // a newer refresh superseded this one
             // Item 2 (round 2) — drop any DC already selected on a DIFFERENT
             // row of this same, still-unsaved form, so the same DC# can't be
             // picked for two vehicles at once before saving.
@@ -528,7 +549,15 @@ function addVehicleRow(row) {
     initSelect2(tr);
     renumberVehicleRows();
 
+    // Remember this row's DC selection (and label) independent of whatever
+    // the dropdown's <option>s look like at any given moment.
+    $('#dc_select_' + vi)
+        .data('dcSel', row.delivery_challan_id ? String(row.delivery_challan_id) : '')
+        .data('dcLabel', row.delivery_challan_label || null);
+
     $('#dc_select_' + vi).on('change', function() {
+        $(this).data('dcSel', this.value || '');
+        $(this).data('dcLabel', this.value ? $(this).find('option:selected').text().replace(/ \(currently linked\)$/, '') : null);
         onDcSelected(vi, this.value);
         // Item 2 (round 2) — this row's pick just changed, so every other
         // row's "available" list needs to drop (or give back) that DC.
@@ -595,6 +624,7 @@ document.getElementById('customer_id').addEventListener('change', function() {
     }
     document.querySelectorAll('#vehicleRows > tr').forEach(function(tr) {
         var vi = tr.id.replace('vehicleRow_', '');
+        $('#dc_select_' + vi).data('dcSel', '').data('dcLabel', null);
         refreshDcDropdown(vi, null, null);
     });
 });
