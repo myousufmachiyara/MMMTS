@@ -579,7 +579,7 @@ class DailyJobController extends Controller
         $pdf->AddPage();
         $pdf->setCellPadding(1.5);
 
-        $yOffset = 12;
+        $yOffset = 0;
 
         $pdf->SetFont('helvetica', 'B', 16);
         $pdf->SetXY(10, $yOffset + 10);
