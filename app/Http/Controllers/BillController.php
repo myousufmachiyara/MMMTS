@@ -460,7 +460,7 @@ class BillController extends Controller
                 $vehicleRowsHtml .= '<tr>
                     <td>' . $vi . '</td>
                     <td>' . e($job->job_no) . '</td>
-                    <td>' . e($line->vehicle->name ?? '') . ' (' . e($line->vehicle->vehicle_no ?? '') . ')</td>
+                    <td>' . e($line->vehicle->name ?? '') . '</td>
                     <td>' . e($line->container_no ?? '—') . '</td>
                     <td>' . e($line->deliveryChallan->dc_no ?? '—') . '</td>
                 </tr>';

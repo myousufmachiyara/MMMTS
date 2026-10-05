@@ -326,7 +326,7 @@ class DeliveryChallanController extends Controller
         $pdf->Cell(0, 7, 'M M LOGISTICS', 0, 1, 'L');
         $pdf->SetFont('helvetica', '', 9);
         $pdf->SetXY(10, $yOffset + 17);
-        $pdf->Cell(0, 5, 'ROOM#301/307 CUSTOM TRADE TOWER KHARADAR KARACHI', 0, 1, 'L');
+        $pdf->Cell(0, 5, 'ROOM #301/307 CUSTOM TRADE TOWER KHARADAR KARACHI', 0, 1, 'L');
         $pdf->SetXY(10, $yOffset + 22);
         $pdf->Cell(0, 5, 'Contact: 021-32316818', 0, 1, 'L');
 
