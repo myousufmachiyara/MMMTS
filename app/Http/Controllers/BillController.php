@@ -361,25 +361,30 @@ class BillController extends Controller
                 <th width="11%">Job Total</th>
             </tr>';
 
-            foreach ($bill->jobs as $i => $job) {
-                $isPty = $job->job_type === 'party_to_party';
-                // Item 3 (round 3) — the multiplier only ever applies to a
-                // Direct job with more than one real vehicle-row; shown here so
-                // it's obvious why "Job Total" no longer matches the raw rate
-                // entered on the job form for those rows.
-                $vehicleCount = $isPty ? 1 : $job->vehicles->filter(fn ($v) => $v->vehicle_id)->count();
-                $multiplierNote = $vehicleCount > 1 ? ' (×' . $vehicleCount . ')' : '';
-                $html .= '<tr>
-                    <td>' . ($i + 1) . '</td>
-                    <td>' . e($job->job_no) . '</td>
-                    <td>' . $job->date->format('d-m-Y') . '</td>
-                    <td>' . e($isPty ? ($job->vendor->name ?? '—') : ($job->vehicles->pluck('vehicle.name')->filter()->implode(', ') ?: '—')) . '</td>
-                    <td>' . e($isPty ? ($job->pty_destination ?? '—') : ($job->route->name ?? ($job->vehicles->pluck('route.name')->filter()->implode(', ') ?: '—'))) . '</td>
-                    <td align="right">' . number_format($job->detention_charges_total, 2) . '</td>
-                    <td align="right">' . number_format($job->other_charges_total, 2) . '</td>
-                    <td align="right">' . number_format($job->bill_amount, 2) . e($multiplierNote) . '</td>
-                </tr>';
-            }
+        foreach ($bill->jobs as $i => $job) {
+            $isPty = $job->job_type === 'party_to_party';
+            // Item 3 (round 3) — a Direct job's charges are entered once and
+            // billed once per vehicle, so a multi-vehicle job reads, left to
+            // right: charges PER VEHICLE (Detention / Other columns), then the
+            // number of vehicles and the resulting TOTAL (Job Total column).
+            // A single-vehicle job (and every Party-to-Party job) prints
+            // exactly as it always did — no notes, per-vehicle == total.
+            $vehicleCount = $job->billableVehicleCount();
+            $multi        = $vehicleCount > 1;
+            $perNote      = $multi ? '<br><span style="font-size:7px;color:#555555;">per vehicle</span>' : '';
+            $totalNote    = $multi ? '<br><span style="font-size:7px;color:#555555;">× ' . $vehicleCount . ' vehicles</span>' : '';
+            $detentionPerVehicle = $isPty ? 0 : (float) $job->detention_total;
+            $html .= '<tr>
+                <td>' . ($i + 1) . '</td>
+                <td>' . e($job->job_no) . '</td>
+                <td>' . $job->date->format('d-m-Y') . '</td>
+                <td>' . e($isPty ? ($job->vendor->name ?? '—') : ($job->vehicles->pluck('vehicle.name')->filter()->implode(', ') ?: '—')) . '</td>
+                <td>' . e($isPty ? ($job->pty_destination ?? '—') : ($job->route->name ?? ($job->vehicles->pluck('route.name')->filter()->implode(', ') ?: '—'))) . '</td>
+                <td align="right">' . number_format($detentionPerVehicle, 2) . $perNote . '</td>
+                <td align="right">' . number_format($job->other_charges_per_vehicle, 2) . $perNote . '</td>
+                <td align="right">' . number_format($job->bill_amount, 2) . $totalNote . '</td>
+            </tr>';
+        }
 
         $html .= '
             <tr style="background-color:#f5f5f5;">
@@ -406,35 +411,55 @@ class BillController extends Controller
         // that used to live on the Job Slip print now lives here instead,
         // summed across every job this bill aggregates (same row labels and
         // layout Job Slip used to show for a single job).
-                // Item 9 — the Rent/Labour/Yard/Kanta/Extra Port/Detention breakdown
-        // that used to live on the Job Slip print now lives here instead,
-        // summed across every job this bill aggregates (same row labels and
-        // layout Job Slip used to show for a single job).
         $pdf->SetFont('helvetica', 'B', 10);
         $pdf->Cell(0, 6, 'Charges Breakdown', 0, 1, 'L');
 
-        // Item 3 (round 3) — these used to sum each job's raw, once-entered
-        // rate columns directly. Now that a job's real bill amount
-        // multiplies by its vehicle count (see
-        // DailyJob::getOtherChargesTotalAttribute()), summing the raw
-        // columns here would silently under-report relative to the "Other
-        // Charges Subtotal" / grand total above for any multi-vehicle job —
-        // so each row is multiplied the same way before summing. Detention
-        // already goes through the (already-multiplied) detention_charges_total
-        // accessor rather than the raw detention_total column.
-        $chargeMultiplier = fn ($job) => $job->job_type === 'party_to_party'
-            ? 1
-            : max($job->vehicles->filter(fn ($v) => $v->vehicle_id)->count(), 1);
+        // Item 3 (round 3) — each row's amount is the TOTAL billed (charge per
+        // vehicle × vehicles, summed over the bill's jobs), so it reconciles
+        // with the "Other Charges Subtotal" / grand total above. For every job
+        // that has more than one vehicle, a small note under the row label
+        // spells out the working — charge per vehicle × number of vehicles —
+        // so the per-vehicle figure isn't lost. Single-vehicle jobs need no
+        // note of their own (per vehicle == total); when a bill mixes both,
+        // their combined share is appended so the note still adds up. With
+        // several jobs on the bill each note is tagged with its job no.; with
+        // one job it isn't, to keep it short.
+        $multipleJobs = $bill->jobs->count() > 1;
+        $breakdownRow = function (string $label, callable $perVehicleOf) use ($bill, $multipleJobs) {
+            $total       = 0;
+            $singleTotal = 0; // single-vehicle jobs' share, so the note still adds up to the amount
+            $notes       = [];
+            foreach ($bill->jobs as $job) {
+                $vehicleCount = $job->billableVehicleCount();
+                $perVehicle   = (float) $perVehicleOf($job);
+                $total       += $perVehicle * $vehicleCount;
+                if ($vehicleCount > 1 && $perVehicle != 0.0) {
+                    $notes[] = ($multipleJobs ? e($job->job_no) . ': ' : '')
+                        . number_format($perVehicle, 2) . ' per vehicle × ' . $vehicleCount . ' vehicles';
+                } elseif ($vehicleCount === 1) {
+                    $singleTotal += $perVehicle;
+                }
+            }
+            if ($notes && $singleTotal != 0.0) {
+                $notes[] = 'single-vehicle jobs: ' . number_format($singleTotal, 2);
+            }
+            $noteHtml = $notes
+                ? '<br><span style="font-size:8px;color:#555555;">' . implode('; ', $notes) . '</span>'
+                : '';
+
+            return '<tr><td width="80%" align="left">' . $label . $noteHtml . '</td><td width="20%">' . number_format($total, 2) . '</td></tr>';
+        };
+        $isPtyJob = fn ($job) => $job->job_type === 'party_to_party';
 
         $breakdownHtml = '
-        <table border="0.3" cellpadding="4" cellspacing="0" width="100%" style="text-align:right;font-size:10px;">
-            <tr><td width="80%" align="left">Rent</td><td width="20%">' . number_format($bill->jobs->sum(fn ($job) => $job->rent * $chargeMultiplier($job)), 2) . '</td></tr>
-            <tr><td align="left">Labour Charges</td><td>' . number_format($bill->jobs->sum(fn ($job) => $job->labour_charges * $chargeMultiplier($job)), 2) . '</td></tr>
-            <tr><td align="left">Yard Charges</td><td>' . number_format($bill->jobs->sum(fn ($job) => $job->yard_charges * $chargeMultiplier($job)), 2) . '</td></tr>
-            <tr><td align="left">Weight Bridge (Kanta)</td><td>' . number_format($bill->jobs->sum(fn ($job) => $job->kanta_charges * $chargeMultiplier($job)), 2) . '</td></tr>
-            <tr><td align="left">Extra Port Charges</td><td>' . number_format($bill->jobs->sum(fn ($job) => $job->extra_port_charges_total * $chargeMultiplier($job)), 2) . '</td></tr>
-            <tr><td align="left">Detention Charges</td><td>' . number_format($bill->jobs->sum('detention_charges_total'), 2) . '</td></tr>
-        </table>';
+        <table border="0.3" cellpadding="4" cellspacing="0" width="100%" style="text-align:right;font-size:10px;">'
+            . $breakdownRow('Rent',                  fn ($job) => $isPtyJob($job) ? 0 : $job->rent)
+            . $breakdownRow('Labour Charges',        fn ($job) => $isPtyJob($job) ? 0 : $job->labour_charges)
+            . $breakdownRow('Yard Charges',          fn ($job) => $isPtyJob($job) ? 0 : $job->yard_charges)
+            . $breakdownRow('Weight Bridge (Kanta)', fn ($job) => $isPtyJob($job) ? 0 : $job->kanta_charges)
+            . $breakdownRow('Extra Port Charges',    fn ($job) => $isPtyJob($job) ? 0 : $job->extra_port_charges_total)
+            . $breakdownRow('Detention Charges',     fn ($job) => $isPtyJob($job) ? 0 : $job->detention_total)
+        . '</table>';
         $pdf->writeHTML($breakdownHtml, true, false, true, false, '');
         $pdf->Ln(4);
 
