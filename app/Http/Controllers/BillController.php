@@ -279,7 +279,7 @@ class BillController extends Controller
         $pdf->setPrintFooter(false);
         $pdf->SetCreator('MMMTS');
         $pdf->SetAuthor('Your Company');
-        $pdf->SetTitle('Bill ' . $bill->bill_no);
+        $pdf->SetTitle($bill->bill_no);
         $pdf->SetMargins(10, 10, 10);
         $pdf->AddPage();
         $pdf->setCellPadding(1.5);
