@@ -155,11 +155,13 @@ document.getElementById('getBillsBtn').addEventListener('click', function() {
         tbody.innerHTML = '';
         bills.forEach(function(b) {
             var tr = document.createElement('tr');
+            // container_count = vehicles across the bill's jobs (one vehicle
+            // = one container), not the number of job rows.
             tr.innerHTML =
-                '<td><input type="checkbox" class="bill-check" name="bill_ids[]" value="' + b.id + '" data-amount="' + b.total_amount + '" data-trip="' + b.trip_plan_subtotal + '" data-jobs="' + b.jobs_count + '"></td>' +
+                '<td><input type="checkbox" class="bill-check" name="bill_ids[]" value="' + b.id + '" data-amount="' + b.total_amount + '" data-trip="' + b.trip_plan_subtotal + '" data-jobs="' + b.container_count + '"></td>' +
                 '<td>' + b.bill_no + '</td>' +
                 '<td>' + b.bill_date + '</td>' +
-                '<td class="text-center">' + b.jobs_count + '</td>' +
+                '<td class="text-center">' + b.container_count + '</td>' +
                 '<td class="text-end">' + fmt(b.trip_plan_subtotal) + '</td>' +
                 '<td class="text-end">' + fmt(b.total_amount) + '</td>';
             tbody.appendChild(tr);

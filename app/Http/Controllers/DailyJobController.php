@@ -36,8 +36,7 @@ class DailyJobController extends Controller
         // column below can distinguish a job that's still waiting on the DC
         // that spawned it (item 1) from one with no DC at all, without an
         // N+1 (see DailyJob::getPendingDeliveryChallanAttribute()).
-        $query = DailyJob::with(['vehicles.vehicle', 'route', 'customer', 'vendor', 'pickupPort', 'dropoffPort', 'deliveryChallans.vehicleLine']);
-
+        $query = DailyJob::with(['vehicles.vehicle', 'ptyVehicles', 'route', 'customer', 'vendor', 'pickupPort', 'dropoffPort', 'deliveryChallans.vehicleLine']);
         $from = $request->filled('from_date') ? $request->from_date : now()->startOfMonth()->toDateString();
         $to   = $request->filled('to_date') ? $request->to_date : now()->toDateString();
         $query->whereBetween('date', [$from, $to]);
@@ -148,9 +147,18 @@ class DailyJobController extends Controller
             'date'             => 'required|date',
             'vendor_id'        => 'required|exists:chart_of_accounts,id',
             'customer_id'      => 'required|exists:chart_of_accounts,id',
-            'pty_vehicle_no'   => 'required|string|max:50',
             'pty_destination'  => 'required|string|max:255',
-            'pty_size'         => 'nullable|string|max:50',
+            // One or more vendor vehicles — plain free text, not dropdowns
+            // (these are the vendor's vehicles, not ours). Replaces the old
+            // single pty_vehicle_no / pty_size inputs; those two columns on
+            // daily_jobs are now just a copy of the first row (see
+            // persistPartyToParty()) so older code reading them keeps working.
+            'vehicles'               => 'required|array|min:1',
+            'vehicles.*.vehicle_no'  => 'required|string|max:50',
+            'vehicles.*.route'       => 'nullable|string|max:255',
+            'vehicles.*.size'        => 'nullable|string|max:50',
+            // pty_cost / pty_sale_amount / pty_advance / pty_guarantee are
+            // entered PER VEHICLE; the job's totals are those × vehicle count.
             'pty_cost'         => 'required|numeric|min:0',
             'pty_sale_amount'  => 'required|numeric|min:0',
             'pty_advance'      => 'nullable|numeric|min:0',
@@ -428,9 +436,30 @@ class DailyJobController extends Controller
 
     // Party-to-Party (Vendor to Customer directly) — simple ledger-style row,
     // no vehicle/route/trip-plan masters involved. Unaffected by items 2/3/11.
+    // Party-to-Party (Vendor to Customer directly) — simple ledger-style row,
+    // no vehicle/route/trip-plan masters involved. Unaffected by items 2/3/11.
+    //
+    // Several vendor vehicles can be entered (free text: vehicle no., route,
+    // size). The money fields are per vehicle; the job's totals are those ×
+    // the number of vehicles (see DailyJob::billableVehicleCount() and the
+    // pty_total_* accessors), so nothing here multiplies — it just stores the
+    // per-vehicle figures as entered, same as a Direct job stores its rates.
     private function persistPartyToParty(Request $request, ?DailyJob $job = null)
     {
+        // A vehicle row left completely blank (an extra "Add Vehicle" click)
+        // is dropped instead of failing validation on its empty Vehicle #.
+        $request->merge(['vehicles' => array_values(array_filter(
+            (array) $request->input('vehicles', []),
+            fn ($row) => is_array($row) && trim(($row['vehicle_no'] ?? '') . ($row['route'] ?? '') . ($row['size'] ?? '')) !== ''
+        ))]);
+
         $data = $request->validate($this->ptyRules());
+
+        $ptyVehicles = array_map(fn ($row) => [
+            'vehicle_no' => trim($row['vehicle_no']),
+            'route'      => isset($row['route']) && trim($row['route']) !== '' ? trim($row['route']) : null,
+            'size'       => isset($row['size'])  && trim($row['size'])  !== '' ? trim($row['size'])  : null,
+        ], $data['vehicles']);
 
         $cost      = (float) $data['pty_cost'];
         $sale      = (float) $data['pty_sale_amount'];
@@ -442,9 +471,12 @@ class DailyJobController extends Controller
             'date'            => $data['date'],
             'vendor_id'       => $data['vendor_id'],
             'customer_id'     => $data['customer_id'],
-            'pty_vehicle_no'  => $data['pty_vehicle_no'],
+            // Legacy single-vehicle columns: kept as a copy of the FIRST row
+            // so anything still reading them sees a sensible value. The real
+            // list lives in daily_job_pty_vehicles.
+            'pty_vehicle_no'  => $ptyVehicles[0]['vehicle_no'],
             'pty_destination' => $data['pty_destination'],
-            'pty_size'        => $data['pty_size'] ?? null,
+            'pty_size'        => $ptyVehicles[0]['size'],
             'pty_cost'        => $cost,
             'pty_sale_amount' => $sale,
             'pty_advance'     => $advance,
@@ -456,18 +488,24 @@ class DailyJobController extends Controller
             'updated_by'      => auth()->id(),
         ];
 
-        return DB::transaction(function () use ($job, $payload) {
+        return DB::transaction(function () use ($job, $payload, $ptyVehicles) {
             if ($job) {
                 $job->update($payload);
-                return $job;
+            } else {
+                $payload['job_no']     = $this->nextJobNo();
+                $payload['job_type']   = 'party_to_party';
+                $payload['status']     = 'complete'; // assistant/admin split doesn't apply to Party-to-Party
+                $payload['created_by'] = auth()->id();
+
+                $job = DailyJob::create($payload);
             }
 
-            $payload['job_no']     = $this->nextJobNo();
-            $payload['job_type']   = 'party_to_party';
-            $payload['status']     = 'complete'; // assistant/admin split doesn't apply to Party-to-Party
-            $payload['created_by'] = auth()->id();
+            // Nothing else points at these rows, so the simplest correct
+            // "sync" is to replace the whole set with what the form sent.
+            $job->ptyVehicles()->delete();
+            $job->ptyVehicles()->createMany($ptyVehicles);
 
-            return DailyJob::create($payload);
+            return $job;
         });
     }
 
@@ -491,7 +529,7 @@ class DailyJobController extends Controller
     {
         $job = DailyJob::with([
             'vehicles.deliveryChallan', 'route', 'pickupPort', 'dropoffPort',
-            'destinationLocation', 'sharedExtraPortCharges',
+            'destinationLocation', 'sharedExtraPortCharges', 'ptyVehicles',
             // Item 1 — deliveryChallans.vehicleLine lets pendingDeliveryChallan
             // (see _form.blade.php's pendingDc handling) find, without an
             // N+1, the DC that spawned this job if it hasn't been assigned
@@ -532,7 +570,7 @@ class DailyJobController extends Controller
     {
         $job = DailyJob::with([
             'vehicles.vehicle', 'vehicles.deliveryChallan',
-            'route', 'pickupPort', 'dropoffPort', 'destinationLocation', 'sharedExtraPortCharges.port',
+            'route', 'pickupPort', 'dropoffPort', 'destinationLocation', 'ptyVehicles', 'sharedExtraPortCharges.port',
             'customer', 'vendor',
         ])->findOrFail($id);
 
@@ -563,10 +601,11 @@ class DailyJobController extends Controller
     // list every vehicle-row (item 3).
     public function print($id)
     {
+        // print()
         $job = DailyJob::with([
             'customer', 'vendor',
             'route', 'pickupPort', 'dropoffPort', 'destinationLocation', 'sharedExtraPortCharges.port',
-            'vehicles.vehicle', 'vehicles.deliveryChallan', 'creator',
+            'vehicles.vehicle', 'vehicles.deliveryChallan', 'ptyVehicles', 'creator',
         ])->findOrFail($id);
 
         $pdf = new \TCPDF();
@@ -626,21 +665,61 @@ class DailyJobController extends Controller
             $html = '
             <table border="0.3" cellpadding="4" cellspacing="0" width="100%" style="font-size:10px;">
                 <tr><td width="30%"><b>Vendor</b></td><td width="70%">' . e($job->vendor->name ?? '') . '</td></tr>
-                <tr><td><b>Vendor Vehicle #</b></td><td>' . e($job->pty_vehicle_no ?? '') . '</td></tr>
                 <tr><td><b>Destination</b></td><td>' . e($job->pty_destination ?? '') . '</td></tr>
-                <tr><td><b>Size</b></td><td>' . e($job->pty_size ?? '') . '</td></tr>
             </table>';
             $pdf->writeHTML($html, true, false, true, false, '');
             $pdf->Ln(3);
 
+            // The vendor's vehicle(s) — free text, one row each (falls back
+            // to the legacy single vehicle/size on the job for a job that
+            // somehow has no rows).
+            $ptyVehicles = $job->ptyVehicles->isNotEmpty()
+                ? $job->ptyVehicles
+                : collect([(object) ['vehicle_no' => $job->pty_vehicle_no, 'route' => null, 'size' => $job->pty_size]]);
+            $ptyVehicleRows = '';
+            foreach ($ptyVehicles as $pi => $pv) {
+                $ptyVehicleRows .= '<tr>
+                    <td>' . ($pi + 1) . '</td>
+                    <td>' . e($pv->vehicle_no ?? '') . '</td>
+                    <td>' . e($pv->route ?? '') . '</td>
+                    <td>' . e($pv->size ?? '') . '</td>
+                </tr>';
+            }
+            $pdf->SetFont('helvetica', 'B', 10);
+            $pdf->Cell(0, 6, 'Vehicles (' . $job->billableVehicleCount() . ')', 0, 1, 'L');
+            $pdf->SetFont('helvetica', '', 10);
+            $vehHtml = '
+            <table border="0.3" cellpadding="4" cellspacing="0" width="100%" style="font-size:10px;">
+                <tr style="background-color:#f5f5f5;font-weight:bold;">
+                    <th width="6%">#</th><th width="34%">Vehicle #</th><th width="40%">Route</th><th width="20%">Size</th>
+                </tr>' . $ptyVehicleRows . '
+            </table>';
+            $pdf->writeHTML($vehHtml, true, false, true, false, '');
+            $pdf->Ln(3);
+
+            // Amounts are entered PER VEHICLE; with more than one vehicle the
+            // job's totals (per-vehicle amount × vehicles) get their own row.
+            $ptyCount = $job->billableVehicleCount();
+            $ptyTotalsRows = $ptyCount > 1 ? '
+                <tr style="background-color:#f5f5f5;">
+                    <td colspan="5" align="left"><b>Total for ' . $ptyCount . ' vehicles</b> (per-vehicle amounts above × ' . $ptyCount . ')</td>
+                </tr>
+                <tr style="font-weight:bold;">
+                    <td>' . number_format($job->pty_total_cost, 2) . '</td>
+                    <td>' . number_format($job->pty_total_sale, 2) . '</td>
+                    <td>' . number_format($job->pty_total_advance, 2) . '</td>
+                    <td>' . number_format($job->pty_total_guarantee, 2) . '</td>
+                    <td>' . number_format($job->pty_total_balance, 2) . '</td>
+                </tr>' : '';
+
             $html2 = '
             <table border="0.3" cellpadding="4" cellspacing="0" width="100%" style="text-align:right;font-size:10px;">
                 <tr style="background-color:#f5f5f5;font-weight:bold;">
-                    <td width="20%" align="left">Vendor Cost</td>
-                    <td width="20%" align="left">Sale to Customer</td>
-                    <td width="20%" align="left">Advance</td>
-                    <td width="20%" align="left">Guarantee</td>
-                    <td width="20%" align="left">Balance Payable</td>
+                    <td width="20%" align="left">Vendor Cost' . ($ptyCount > 1 ? ' (per vehicle)' : '') . '</td>
+                    <td width="20%" align="left">Sale to Customer' . ($ptyCount > 1 ? ' (per vehicle)' : '') . '</td>
+                    <td width="20%" align="left">Advance' . ($ptyCount > 1 ? ' (per vehicle)' : '') . '</td>
+                    <td width="20%" align="left">Guarantee' . ($ptyCount > 1 ? ' (per vehicle)' : '') . '</td>
+                    <td width="20%" align="left">Balance Payable' . ($ptyCount > 1 ? ' (per vehicle)' : '') . '</td>
                 </tr>
                 <tr>
                     <td>' . number_format($job->pty_cost, 2) . '</td>
@@ -648,7 +727,7 @@ class DailyJobController extends Controller
                     <td>' . number_format($job->pty_advance, 2) . '</td>
                     <td>' . number_format($job->pty_guarantee, 2) . '</td>
                     <td>' . number_format($job->pty_balance, 2) . '</td>
-                </tr>
+                </tr>' . $ptyTotalsRows . '
             </table>';
             $pdf->writeHTML($html2, true, false, true, false, '');
             $pdf->Ln(3);

@@ -106,13 +106,11 @@
                   <td>{{ $row->date->format('d-m-Y') }}</td>
                   <td>
                     @if($row->job_type === 'party_to_party')
-                      {{ $row->pty_vehicle_no ?? '—' }}
-                    @else
-                      {{ $row->vehicles->pluck('vehicle.name')->filter()->implode(', ') ?: '—' }}
-                      @if($row->vehicles->count() > 1)
-                        <span class="badge bg-light text-dark border">{{ $row->vehicles->count() }} vehicles</span>
+                      {{ $row->pty_vehicle_list ?: '—' }}
+                      @if($row->ptyVehicles->count() > 1)
+                        <span class="badge bg-light text-dark border">{{ $row->ptyVehicles->count() }} vehicles</span>
                       @endif
-                    @endif
+                    @else
                   </td>
                   <td>{{ $row->customer->name ?? '—' }}</td>
                   <td>{{ $row->job_type === 'party_to_party' ? ($row->pty_destination ?? '—') : ($row->route->name ?? ($row->vehicles->pluck('route.name')->filter()->implode(', ') ?: '—')) }}</td>

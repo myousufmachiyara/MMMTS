@@ -95,6 +95,19 @@ class DailyJob extends Model
         return $this->belongsTo(Vehicle::class);
     }
 
+
+    public function ptyVehicles()
+    {
+        return $this->hasMany(DailyJobPtyVehicle::class)->orderBy('id');
+    }
+
+    public function getPtyVehicleListAttribute(): string
+    {
+        $nos = ($this->relationLoaded('ptyVehicles') ? $this->ptyVehicles : $this->ptyVehicles()->get())
+            ->pluck('vehicle_no')->filter()->implode(', ');
+
+        return $nos !== '' ? $nos : (string) $this->pty_vehicle_no;
+    }
     // Item 4 — who created this job, shown on the Job Slip print.
     public function creator()
     {
@@ -206,17 +219,6 @@ class DailyJob extends Model
             : $this->vehicles()->whereNotNull('delivery_challan_id')->exists();
     }
 
-    // Profit on a Party-to-Party job = what we bill the customer minus what we
-    // owe the vendor. Not meaningful for Direct jobs (returns null there).
-    public function getPtyProfitAttribute(): ?float
-    {
-        if ($this->job_type !== 'party_to_party') {
-            return null;
-        }
-
-        return round((float) $this->pty_sale_amount - (float) $this->pty_cost, 2);
-    }
-
     // Item 3 (round 3) — "job total amount * no of vehicles on the job =
     // total bill amount of that job". A Direct job's charges (rent, labour,
     // yard, kanta, detention, extra port) are still entered ONCE on the job
@@ -275,8 +277,15 @@ class DailyJob extends Model
 
     public function billableVehicleCount(): int
     {
+        // Party-to-Party: the vendor vehicles typed in on the job (one row
+        // each, see ptyVehicles()). Floored at 1 like Direct jobs, so an old
+        // job with no rows still bills as a single vehicle, never as zero.
         if ($this->job_type === 'party_to_party') {
-            return 1;
+            $count = $this->relationLoaded('ptyVehicles')
+                ? $this->ptyVehicles->count()
+                : $this->ptyVehicles()->count();
+
+            return max($count, 1);
         }
 
         $count = $this->relationLoaded('vehicles')
@@ -284,6 +293,33 @@ class DailyJob extends Model
             : $this->vehicles()->whereNotNull('vehicle_id')->count();
 
         return max($count, 1);
+    }
+
+    private function ptyTotal(string $field): ?float
+    {
+        if ($this->job_type !== 'party_to_party') {
+            return null;
+        }
+
+        return round((float) $this->{$field} * $this->billableVehicleCount(), 2);
+    }
+
+    public function getPtyTotalCostAttribute(): ?float      { return $this->ptyTotal('pty_cost'); }
+    public function getPtyTotalSaleAttribute(): ?float      { return $this->ptyTotal('pty_sale_amount'); }
+    public function getPtyTotalAdvanceAttribute(): ?float   { return $this->ptyTotal('pty_advance'); }
+    public function getPtyTotalGuaranteeAttribute(): ?float { return $this->ptyTotal('pty_guarantee'); }
+    public function getPtyTotalBalanceAttribute(): ?float   { return $this->ptyTotal('pty_balance'); }
+
+    // Profit on a Party-to-Party job = what we bill the customer minus what we
+    // owe the vendor, for ALL the job's vehicles (per-vehicle profit × the
+    // vehicle count). Not meaningful for Direct jobs (returns null there).
+    public function getPtyProfitAttribute(): ?float
+    {
+        if ($this->job_type !== 'party_to_party') {
+            return null;
+        }
+
+        return round($this->pty_total_sale - $this->pty_total_cost, 2);
     }
 
     public function getOtherChargesTotalAttribute()

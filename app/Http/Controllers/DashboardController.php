@@ -34,6 +34,8 @@ class DashboardController extends Controller
             'total_receivables' => round(Invoice::sum('total_amount') - Invoice::sum('paid_amount'), 2),
 
             // Total outstanding to vendors from the Party-to-Party ledger (what we owe vendors)
+            // — balance is stored per vehicle, so use the ×vehicle-count total.
+            'total_payables' => round(DailyJob::with('ptyVehicles')->where('job_type', 'party_to_party')->get()->sum('pty_total_balance'), 2),
             'total_payables' => round(DailyJob::where('job_type', 'party_to_party')->sum('pty_balance'), 2),
         ];
 

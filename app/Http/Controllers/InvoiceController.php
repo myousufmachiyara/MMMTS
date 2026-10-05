@@ -49,7 +49,10 @@ class InvoiceController extends Controller
         $bills = Bill::where('customer_id', $request->customer_id)
             ->whereNull('invoice_id')
             ->whereBetween('bill_date', [$request->from_date, $request->to_date])
-            ->withCount('jobs')
+            // jobs.vehicles / jobs.ptyVehicles so container_count (vehicles,
+            // not job rows) is computed from loaded data — see
+            // Bill::getContainerCountAttribute().
+            ->with(['jobs.vehicles', 'jobs.ptyVehicles'])
             ->orderBy('bill_date')
             ->get(['id', 'bill_no', 'bill_date', 'trip_plan_subtotal', 'other_charges_subtotal', 'total_amount'])
             ->map(function ($bill) {
@@ -59,7 +62,7 @@ class InvoiceController extends Controller
                     'bill_date'           => $bill->bill_date->format('Y-m-d'),
                     'trip_plan_subtotal'  => (float) $bill->trip_plan_subtotal,
                     'total_amount'        => (float) $bill->total_amount,
-                    'jobs_count'          => $bill->jobs_count,
+                    'container_count'     => $bill->container_count,
                 ];
             });
 
@@ -106,6 +109,7 @@ class InvoiceController extends Controller
                 $bills = Bill::where('customer_id', $data['customer_id'])
                     ->whereNull('invoice_id')
                     ->whereIn('id', $data['bill_ids'])
+                    ->with(['jobs.vehicles', 'jobs.ptyVehicles'])
                     ->lockForUpdate()
                     ->get();
 
@@ -135,7 +139,8 @@ class InvoiceController extends Controller
                 $customerTaxAmount = $isTaxable ? round($taxAmount * $customerTaxSharePct / 100, 2) : 0;
                 $companyTaxAmount  = $isTaxable ? round($taxAmount - $customerTaxAmount, 2) : 0;
                 $total     = round($billsSubtotal + $customerTaxAmount, 2);
-                $totalContainers = (int) $bills->sum(fn ($bill) => $bill->jobs()->count());
+                // One vehicle = one container (see Bill::getContainerCountAttribute()).
+                $totalContainers = (int) $bills->sum(fn ($bill) => $bill->container_count);
 
                 // Auto-post only the CUSTOMER's share: Dr Customer / Cr Sales
                 // Tax Payable. (The bills' own revenue recognition was
@@ -253,7 +258,9 @@ class InvoiceController extends Controller
     // itemised by the bills that make up this invoice.
     public function print($id)
     {
-        $invoice = Invoice::with(['customer', 'bills.company', 'creator'])->findOrFail($id);
+        // bills.jobs.vehicles / ptyVehicles so each bill's container count
+        // (vehicles, not job rows) comes from loaded data.
+        $invoice = Invoice::with(['customer', 'bills.company', 'bills.jobs.vehicles', 'bills.jobs.ptyVehicles', 'creator'])->findOrFail($id);
 
         $pdf = new \TCPDF();
         $pdf->setPrintHeader(false);
@@ -348,15 +355,11 @@ class InvoiceController extends Controller
             </tr>';
         }
 
-        $html .= '
-            <tr style="background-color:#f5f5f5;">
-                <td colspan="4" align="right">Subtotal (Bills)</td>
-                <td align="right">' . number_format($invoice->total_amount - $invoice->tax_amount, 2) . '</td>
-            </tr>';
-
-        // Item 2 (round 3) — grand-total-before-tax is now derived from
+        // Item 2 (round 3) — grand-total-before-tax is derived from
         // customer_tax_amount (what actually landed in total_amount), not
-        // the full tax_amount — see InvoiceController::store().
+        // the full tax_amount — see InvoiceController::store(). This is the
+        // ONE "Subtotal (Bills)" row; the older row based on
+        // total_amount - tax_amount was wrong once the tax is split.
         $grandTotalBeforeTax = $invoice->total_amount - $invoice->customer_tax_amount;
 
         $html .= '
@@ -389,7 +392,7 @@ class InvoiceController extends Controller
             </tr>
             <tr>
                 <td colspan="4" align="right">Total Containers</td>
-                <td align="right">' . $invoice->total_containers . '</td>
+                <td align="right">' . $invoice->bills->sum('container_count') . '</td>
             </tr>';
         $html .= '</table>';
         $pdf->writeHTML($html, true, false, true, false, '');
@@ -409,6 +412,12 @@ class InvoiceController extends Controller
 
         if (!empty($invoice->remarks)) {
             $pdf->writeHTML('<b>Remarks:</b><br><span style="font-size:12px;">' . nl2br(e($invoice->remarks)) . '</span>', true, false, true, false, '');
+        }
+
+        // If the content above has filled the page, start the signature block
+        // on a fresh page as a whole instead of splitting it across pages.
+        if ($pdf->GetY() + 32 > $pdf->getPageHeight() - $pdf->getBreakMargin()) {
+            $pdf->AddPage();
         }
 
         $pdf->Ln(20);

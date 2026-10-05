@@ -238,8 +238,7 @@ class FleetReportController extends Controller
         // Eager-load the real vehicles.vehicle chain so every report below
         // can read a job's actual vehicle(s). Also eager-loads each
         // vehicle's companies (item 15's companyShare() needs this).
-        return DailyJob::with(['vehicles.vehicle.companies', 'customer', 'vendor', 'route'])
-            ->whereBetween('date', [$from, $to]);
+       return DailyJob::with(['vehicles.vehicle.companies', 'ptyVehicles', 'customer', 'vendor', 'route'])->whereBetween('date', [$from, $to]);
     }
 
     // ── Vehicle Wise: trips run + revenue per vehicle (Direct jobs only — party-to-party has no our-vehicle) ──
@@ -413,7 +412,6 @@ class FleetReportController extends Controller
             ->values();
     }
 
-    // ── Vendor Wise: Party-to-Party ledger — cost/sale/profit/advance/guarantee/balance per vendor ──
     private function vendorWise($from, $to)
     {
         return $this->jobsInRange($from, $to)
@@ -423,17 +421,19 @@ class FleetReportController extends Controller
             ->groupBy('vendor_id')
             ->map(function ($jobs, $vendorId) {
                 $vendor = $jobs->first()->vendor;
-                $totalCost = round($jobs->sum('pty_cost'), 2);
-                $totalSale = round($jobs->sum('pty_sale_amount'), 2);
+                // Amounts are stored per vehicle; the pty_total_* accessors
+                // multiply by each job's vehicle count.
+                $totalCost = round($jobs->sum('pty_total_cost'), 2);
+                $totalSale = round($jobs->sum('pty_total_sale'), 2);
                 return [
                     'vendor'          => $vendor->name ?? '—',
                     'job_count'       => $jobs->count(),
                     'total_cost'      => $totalCost,
                     'total_sale'      => $totalSale,
                     'total_profit'    => round($totalSale - $totalCost, 2),
-                    'total_advance'   => round($jobs->sum('pty_advance'), 2),
-                    'total_guarantee' => round($jobs->sum('pty_guarantee'), 2),
-                    'total_balance'   => round($jobs->sum('pty_balance'), 2),
+                    'total_advance'   => round($jobs->sum('pty_total_advance'), 2),
+                    'total_guarantee' => round($jobs->sum('pty_total_guarantee'), 2),
+                    'total_balance'   => round($jobs->sum('pty_total_balance'), 2),
                 ];
             })
             ->sortByDesc('total_sale')

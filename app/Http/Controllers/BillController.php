@@ -17,8 +17,7 @@ class BillController extends Controller
 {
     public function index(Request $request)
     {
-        $query = Bill::with('customer')->withCount('jobs');
-
+        $query = Bill::with(['customer', 'jobs.vehicles', 'jobs.ptyVehicles']);
         if ($request->filled('customer_id') && $request->customer_id !== 'all') {
             $query->where('customer_id', $request->customer_id);
         }
@@ -50,8 +49,7 @@ class BillController extends Controller
             'from_date'   => 'required|date',
             'to_date'     => 'required|date|after_or_equal:from_date',
         ]);
-
-        $jobs = DailyJob::with(['vehicles.vehicle', 'route', 'vendor'])
+        $jobs = DailyJob::with(['vehicles.vehicle', 'ptyVehicles', 'route', 'vendor'])
             ->where('customer_id', $request->customer_id)
             ->whereNull('bill_id')
             // An 'incomplete' Direct job (item 11 — assistant hasn't had its
@@ -69,7 +67,8 @@ class BillController extends Controller
                     'job_no'                   => $job->job_no,
                     'job_type'                 => $job->job_type,
                     'date'                     => $job->date->format('Y-m-d'),
-                    'vehicle'                  => $isPty ? ($job->pty_vehicle_no ?? '—') : ($job->vehicles->pluck('vehicle.name')->filter()->implode(', ') ?: '—'),
+                    'vehicle'                  => $isPty ? ($job->pty_vehicle_list ?: '—') : ($job->vehicles->pluck('vehicle.name')->filter()->implode(', ') ?: '—'),
+                    'vehicle_count'            => $job->billableVehicleCount(),
                     'route'                    => $isPty ? ($job->pty_destination ?? '—') : ($job->route->name ?? ($job->vehicles->pluck('route.name')->filter()->implode(', ') ?: '—')),
                     'vendor'                   => $isPty ? ($job->vendor->name ?? '—') : null,
                     'trip_plan_total'          => (float) $job->trip_plan_total,
@@ -269,9 +268,10 @@ class BillController extends Controller
     // Print — Bill PDF itemising the jobs it aggregates.
     public function print($id)
     {
+
         $bill = Bill::with([
             'customer', 'company', 'creator',
-            'jobs.vehicles.vehicle', 'jobs.vehicles.deliveryChallan', 'jobs.route', 'jobs.vendor',
+            'jobs.vehicles.vehicle', 'jobs.vehicles.deliveryChallan', 'jobs.ptyVehicles', 'jobs.route', 'jobs.vendor',
         ])->findOrFail($id);
 
         $pdf = new \TCPDF();
@@ -470,14 +470,23 @@ class BillController extends Controller
         $vi = 0;
         foreach ($bill->jobs as $job) {
             if ($job->job_type === 'party_to_party') {
-                $vi++;
-                $vehicleRowsHtml .= '<tr>
+                // One row per vendor vehicle (free-text no.; route/size shown
+                // as a small note under it when entered). Jobs saved before
+                // multi-vehicle fall back to their single legacy vehicle.
+                $ptyRows = $job->ptyVehicles->isNotEmpty()
+                    ? $job->ptyVehicles
+                    : collect([(object) ['vehicle_no' => $job->pty_vehicle_no, 'route' => null, 'size' => $job->pty_size]]);
+                foreach ($ptyRows as $pv) {
+                    $vi++;
+                    $extra = trim(implode(' · ', array_filter([$pv->route ?? null, $pv->size ?? null])));
+                    $vehicleRowsHtml .= '<tr>
                     <td>' . $vi . '</td>
                     <td>' . e($job->job_no) . '</td>
-                    <td>' . e($job->pty_vehicle_no ?? '—') . '</td>
+                    <td>' . e($pv->vehicle_no ?: '—') . ($extra !== '' ? '<br><span style="font-size:7px;color:#555555;">' . e($extra) . '</span>' : '') . '</td>
                     <td>—</td>
                     <td>—</td>
                 </tr>';
+                }
                 continue;
             }
             foreach ($job->vehicles as $line) {
@@ -512,6 +521,9 @@ class BillController extends Controller
 
         if (!empty($bill->remarks)) {
             $pdf->writeHTML('<b>Remarks:</b><br><span style="font-size:12px;">' . nl2br(e($bill->remarks)) . '</span>', true, false, true, false, '');
+        }
+        if ($pdf->GetY() + 32 > $pdf->getPageHeight() - $pdf->getBreakMargin()) {
+            $pdf->AddPage();
         }
 
         $pdf->Ln(20);
