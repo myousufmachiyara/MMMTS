@@ -594,7 +594,7 @@ class DailyJobController extends Controller
         $pdf->SetXY(140, $yOffset + 10);
         $pdf->Cell(60, 6, 'JOB SLIP', 0, 1, 'R');
         $pdf->Line(10, $yOffset + 30, 200, $yOffset + 30);
-        $pdf->Ln(9);
+        $pdf->Ln(15);
 
 
         $pdf->SetFont('helvetica', '', 10);
