@@ -69,6 +69,7 @@ class DailyJob extends Model
         'pty_advance',
         'pty_guarantee',
         'pty_balance',
+        'pty_voucher_id', // vendor-payable voucher posted when the job's Bill was created
         // ── Delivery Challan (Direct jobs only — proof our vehicle delivered/
         // received the container). Snapshot fields living on the job itself
         // rather than a separate module, since a DC carries no accounting
@@ -95,19 +96,6 @@ class DailyJob extends Model
         return $this->belongsTo(Vehicle::class);
     }
 
-
-    public function ptyVehicles()
-    {
-        return $this->hasMany(DailyJobPtyVehicle::class)->orderBy('id');
-    }
-
-    public function getPtyVehicleListAttribute(): string
-    {
-        $nos = ($this->relationLoaded('ptyVehicles') ? $this->ptyVehicles : $this->ptyVehicles()->get())
-            ->pluck('vehicle_no')->filter()->implode(', ');
-
-        return $nos !== '' ? $nos : (string) $this->pty_vehicle_no;
-    }
     // Item 4 — who created this job, shown on the Job Slip print.
     public function creator()
     {
@@ -174,6 +162,27 @@ class DailyJob extends Model
         return $this->hasMany(DailyJobVehicle::class)->orderBy('id');
     }
 
+    // Party-to-Party counterpart of vehicles() above — one row per VENDOR
+    // vehicle on the job, every field plain free text (vehicle no., route,
+    // size; see the 2026_10_06_090000 migration). The job's money fields
+    // (pty_cost / pty_sale_amount / ...) are per vehicle, so the job's real
+    // totals are those × this relation's row count (billableVehicleCount()).
+    public function ptyVehicles()
+    {
+        return $this->hasMany(DailyJobPtyVehicle::class)->orderBy('id');
+    }
+
+    // "TLR-820, ABC-111" — the job's vehicle numbers on one line, for lists
+    // and the bill picker. Falls back to the legacy single pty_vehicle_no for
+    // any job that somehow has no rows. Party-to-Party only.
+    public function getPtyVehicleListAttribute(): string
+    {
+        $nos = ($this->relationLoaded('ptyVehicles') ? $this->ptyVehicles : $this->ptyVehicles()->get())
+            ->pluck('vehicle_no')->filter()->implode(', ');
+
+        return $nos !== '' ? $nos : (string) $this->pty_vehicle_no;
+    }
+
     public function bill()
     {
         return $this->belongsTo(Bill::class);
@@ -219,82 +228,11 @@ class DailyJob extends Model
             : $this->vehicles()->whereNotNull('delivery_challan_id')->exists();
     }
 
-    // Item 3 (round 3) — "job total amount * no of vehicles on the job =
-    // total bill amount of that job". A Direct job's charges (rent, labour,
-    // yard, kanta, detention, extra port) are still entered ONCE on the job
-    // header, same as before — but every one of this job's REAL vehicle-rows
-    // (vehicle_id set — excludes any stray row without one) is now billed as
-    // if it independently made the same full trip, so the amount that
-    // actually gets billed multiplies by how many vehicles are on the job.
-    // A job with zero vehicle-rows (shouldn't normally happen — the form
-    // requires at least one) is treated as ×1 rather than ×0, so it's never
-    // silently billed as zero. Party-to-Party jobs have no vehicles() rows
-    // at all (job_total already equals the single pty_sale_amount), so they
-    // pass through unmultiplied.
-    //
-    // Prefers the already-loaded vehicles relation (every report/controller
-    // that reads this already eager-loads 'vehicles...') to avoid N+1; falls
-    // back to a fresh count only when it genuinely isn't loaded.
-
-
-    // "Other charges" = everything except the Trip Plan portion. Trip Plan
-    // no longer carries any charges of its own (item 2) — tax is applied to
-    // the job's grand total instead (item 13). Rent/labour/yard/kanta/
-    // detention/extra-port-charges are shared once across the whole job
-    // (not per vehicle any more — see this model's vehicles() docblock), so
-    // for Direct jobs this is those job-header fields added up once, THEN
-    // multiplied by billableVehicleCount() (item 3, round 3 — see above).
-    // Party-to-Party jobs have no trip-plan/vehicle-row concept, so the
-    // amount billed to the customer (pty_sale_amount — NOT pty_cost, which
-    // is what we owe the vendor) is carried entirely as "other charges" here,
-    // unmultiplied (billableVehicleCount() is always 1 for these).
-
-
-    // Item 3 (round 3) — a clearer name than "other charges" to reach for at
-    // billing call sites (BillController, FleetReportController): the
-    // actual amount this job contributes to a Bill. Same figure as
-    // other_charges_total above — kept as a thin alias so billing code
-    // doesn't have to borrow "other charges" terminology.
-    public function getBillAmountAttribute()
-    {
-        return $this->other_charges_total;
-    }
-
-    // Detention Charges (formerly "Per Day Charges", then "Retention
-    // Charges" — item 6/9) — a single shared amount per job (item 10's Bill
-    // column), multiplied the same way other_charges_total is (item 3,
-    // round 3) so the Bill print's separate Detention/Other breakdown rows
-    // stay consistent with each other. Not meaningful for Party-to-Party
-    // jobs.
-    public function getDetentionChargesTotalAttribute()
-    {
-        if ($this->job_type === 'party_to_party') {
-            return 0;
-        }
-
-        return round((float) $this->detention_total * $this->billableVehicleCount(), 2);
-    }
-
-    public function billableVehicleCount(): int
-    {
-        // Party-to-Party: the vendor vehicles typed in on the job (one row
-        // each, see ptyVehicles()). Floored at 1 like Direct jobs, so an old
-        // job with no rows still bills as a single vehicle, never as zero.
-        if ($this->job_type === 'party_to_party') {
-            $count = $this->relationLoaded('ptyVehicles')
-                ? $this->ptyVehicles->count()
-                : $this->ptyVehicles()->count();
-
-            return max($count, 1);
-        }
-
-        $count = $this->relationLoaded('vehicles')
-            ? $this->vehicles->filter(fn ($v) => $v->vehicle_id)->count()
-            : $this->vehicles()->whereNotNull('vehicle_id')->count();
-
-        return max($count, 1);
-    }
-
+    // Party-to-Party money fields (pty_cost / pty_sale_amount / pty_advance /
+    // pty_guarantee / pty_balance) are entered — and stored — PER VEHICLE; a
+    // job with several vehicles totals them × billableVehicleCount(), the same
+    // way a Direct job's charges do. These accessors are those totals (null
+    // for Direct jobs). A one-vehicle job's totals equal its stored amounts.
     private function ptyTotal(string $field): ?float
     {
         if ($this->job_type !== 'party_to_party') {
@@ -322,6 +260,56 @@ class DailyJob extends Model
         return round($this->pty_total_sale - $this->pty_total_cost, 2);
     }
 
+    // Item 3 (round 3) — "job total amount * no of vehicles on the job =
+    // total bill amount of that job". A Direct job's charges (rent, labour,
+    // yard, kanta, detention, extra port) are still entered ONCE on the job
+    // header, same as before — but every one of this job's REAL vehicle-rows
+    // (vehicle_id set — excludes any stray row without one) is now billed as
+    // if it independently made the same full trip, so the amount that
+    // actually gets billed multiplies by how many vehicles are on the job.
+    // A job with zero vehicle-rows (shouldn't normally happen — the form
+    // requires at least one) is treated as ×1 rather than ×0, so it's never
+    // silently billed as zero. Party-to-Party jobs work the same way but
+    // count their free-text ptyVehicles() rows (pty_sale_amount is the
+    // per-vehicle amount, like a Direct job's rates).
+    //
+    // Prefers the already-loaded vehicles relation (every report/controller
+    // that reads this already eager-loads 'vehicles...') to avoid N+1; falls
+    // back to a fresh count only when it genuinely isn't loaded.
+    //
+    // Public (was private) so the Bill print, container counts and reports can
+    // all ask the job itself instead of each re-deriving the same number.
+    public function billableVehicleCount(): int
+    {
+        // Party-to-Party: the vendor vehicles typed in on the job (one row
+        // each, see ptyVehicles()). Floored at 1 like Direct jobs, so an old
+        // job with no rows still bills as a single vehicle, never as zero.
+        if ($this->job_type === 'party_to_party') {
+            $count = $this->relationLoaded('ptyVehicles')
+                ? $this->ptyVehicles->count()
+                : $this->ptyVehicles()->count();
+
+            return max($count, 1);
+        }
+
+        $count = $this->relationLoaded('vehicles')
+            ? $this->vehicles->filter(fn ($v) => $v->vehicle_id)->count()
+            : $this->vehicles()->whereNotNull('vehicle_id')->count();
+
+        return max($count, 1);
+    }
+
+    // "Other charges" = everything except the Trip Plan portion. Trip Plan
+    // no longer carries any charges of its own (item 2) — tax is applied to
+    // the job's grand total instead (item 13). Rent/labour/yard/kanta/
+    // detention/extra-port-charges are shared once across the whole job
+    // (not per vehicle any more — see this model's vehicles() docblock), so
+    // for Direct jobs this is those job-header fields added up once, THEN
+    // multiplied by billableVehicleCount() (item 3, round 3 — see above).
+    // Party-to-Party jobs have no trip-plan concept, so the amount billed to
+    // the customer per vehicle (pty_sale_amount — NOT pty_cost, which is what
+    // we owe the vendor) is carried entirely as "other charges" here, and is
+    // multiplied by the job's number of vendor vehicles like any other job.
     public function getOtherChargesTotalAttribute()
     {
         return round($this->other_charges_per_vehicle * $this->billableVehicleCount(), 2);
@@ -330,7 +318,7 @@ class DailyJob extends Model
     // The same figure as other_charges_total above, but for ONE vehicle —
     // i.e. before the ×vehicle-count multiplier. This is what the Bill print
     // shows as "charges per vehicle" next to the vehicle count and the total.
-    // (Party-to-Party jobs have a single sale amount and are never multiplied.)
+    // (For a Party-to-Party job this is its per-vehicle pty_sale_amount.)
     public function getOtherChargesPerVehicleAttribute()
     {
         if ($this->job_type === 'party_to_party') {
@@ -342,5 +330,30 @@ class DailyJob extends Model
             + (float) $this->kanta_charges + (float) $this->detention_total + (float) $this->extra_port_charges_total,
             2
         );
+    }
+
+    // Item 3 (round 3) — a clearer name than "other charges" to reach for at
+    // billing call sites (BillController, FleetReportController): the
+    // actual amount this job contributes to a Bill. Same figure as
+    // other_charges_total above — kept as a thin alias so billing code
+    // doesn't have to borrow "other charges" terminology.
+    public function getBillAmountAttribute()
+    {
+        return $this->other_charges_total;
+    }
+
+    // Detention Charges (formerly "Per Day Charges", then "Retention
+    // Charges" — item 6/9) — a single shared amount per job (item 10's Bill
+    // column), multiplied the same way other_charges_total is (item 3,
+    // round 3) so the Bill print's separate Detention/Other breakdown rows
+    // stay consistent with each other. Not meaningful for Party-to-Party
+    // jobs.
+    public function getDetentionChargesTotalAttribute()
+    {
+        if ($this->job_type === 'party_to_party') {
+            return 0;
+        }
+
+        return round((float) $this->detention_total * $this->billableVehicleCount(), 2);
     }
 }

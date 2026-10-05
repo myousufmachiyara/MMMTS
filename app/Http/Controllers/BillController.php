@@ -17,7 +17,10 @@ class BillController extends Controller
 {
     public function index(Request $request)
     {
+        // jobs.vehicles eager-loaded so each row's Containers figure (vehicles,
+        // not job rows — see Bill::getContainerCountAttribute()) costs no extra queries.
         $query = Bill::with(['customer', 'jobs.vehicles', 'jobs.ptyVehicles']);
+
         if ($request->filled('customer_id') && $request->customer_id !== 'all') {
             $query->where('customer_id', $request->customer_id);
         }
@@ -49,6 +52,7 @@ class BillController extends Controller
             'from_date'   => 'required|date',
             'to_date'     => 'required|date|after_or_equal:from_date',
         ]);
+
         $jobs = DailyJob::with(['vehicles.vehicle', 'ptyVehicles', 'route', 'vendor'])
             ->where('customer_id', $request->customer_id)
             ->whereNull('bill_id')
@@ -68,7 +72,9 @@ class BillController extends Controller
                     'job_type'                 => $job->job_type,
                     'date'                     => $job->date->format('Y-m-d'),
                     'vehicle'                  => $isPty ? ($job->pty_vehicle_list ?: '—') : ($job->vehicles->pluck('vehicle.name')->filter()->implode(', ') ?: '—'),
-                    'vehicle_count'            => $job->billableVehicleCount(),
+                    // Route is shared across every vehicle on the job — read
+                    // from the job header, falling back to a per-vehicle
+                    // pluck only for older jobs saved before that change.
                     'route'                    => $isPty ? ($job->pty_destination ?? '—') : ($job->route->name ?? ($job->vehicles->pluck('route.name')->filter()->implode(', ') ?: '—')),
                     'vendor'                   => $isPty ? ($job->vendor->name ?? '—') : null,
                     'trip_plan_total'          => (float) $job->trip_plan_total,
@@ -84,7 +90,7 @@ class BillController extends Controller
                     'job_total'                => (float) $job->bill_amount,
                     // Vehicle count included so the picker can show "×3"
                     // next to jobs where the multiplier actually applies.
-                    'vehicle_count'            => $isPty ? 1 : $job->vehicles->filter(fn ($v) => $v->vehicle_id)->count(),
+                    'vehicle_count'            => $job->billableVehicleCount(),
                 ];
             });
 
@@ -107,6 +113,17 @@ class BillController extends Controller
     {
         return ChartOfAccounts::where('account_code', '401001')->value('id')
             ?? ChartOfAccounts::where('account_type', 'revenue')->value('id');
+    }
+
+    // Where a Party-to-Party job's vendor cost is expensed (Dr side of the
+    // vendor-payable voucher). The chart of accounts has no dedicated
+    // "vehicle hire / vendor charges" account, so this uses the direct-cost
+    // (COGS) account, falling back to any expense account. Change the code
+    // here (or add a dedicated account of type 'cogs') to post it elsewhere.
+    private function ptyCostAccountId(): ?int
+    {
+        return ChartOfAccounts::where('account_type', 'cogs')->orderBy('id')->value('id')
+            ?? ChartOfAccounts::where('account_type', 'expenses')->orderBy('id')->value('id');
     }
 
     private function rules(): array
@@ -132,10 +149,12 @@ class BillController extends Controller
             Log::info('[Bill] Store called', ['user_id' => auth()->id()]);
             $data = $request->validate($this->rules());
 
-            $bill = DB::transaction(function () use ($data) {
+            $warnings = [];
+
+            $bill = DB::transaction(function () use ($data, &$warnings) {
                 // Never trust client-side totals — recompute from the live job records,
                 // scoped to this customer and still non-billed (avoids double-billing races).
-                $jobs = DailyJob::with('vehicles')
+                $jobs = DailyJob::with(['vehicles', 'ptyVehicles'])
                     ->where('customer_id', $data['customer_id'])
                     ->whereNull('bill_id')
                     // Mirrors getJobs() — never bill a Direct job an admin
@@ -194,10 +213,44 @@ class BillController extends Controller
 
                 DailyJob::whereIn('id', $jobs->pluck('id'))->update(['bill_id' => $bill->id]);
 
+                if (!$voucher) {
+                    $warnings[] = 'No customer receivable voucher was posted — no Sales Revenue account (code 401001 / type "revenue") exists in the chart of accounts.';
+                }
+
+                // Party-to-Party jobs: also post what we owe the vendor —
+                // Dr cost account / Cr Vendor, for the job's total vendor cost
+                // (per-vehicle cost × vehicles). One voucher per job so it
+                // stays traceable to that job and can be reversed with the bill.
+                $ptyJobs = $jobs->filter(fn ($j) => $j->job_type === 'party_to_party' && $j->vendor_id && (float) $j->pty_total_cost > 0);
+                if ($ptyJobs->isNotEmpty()) {
+                    $costAccountId = $this->ptyCostAccountId();
+                    if (!$costAccountId) {
+                        $warnings[] = 'No vendor payable vouchers were posted for the Party-to-Party jobs — no cost/expense account exists in the chart of accounts.';
+                    } else {
+                        foreach ($ptyJobs as $job) {
+                            $ptyVoucher = Voucher::create([
+                                'voucher_type' => 'journal',
+                                'date'         => $data['bill_date'],
+                                'ac_dr_sid'    => $costAccountId,
+                                'ac_cr_sid'    => $job->vendor_id,
+                                'amount'       => $job->pty_total_cost,
+                                'reference'    => $billNo,
+                                'remarks'      => "Vendor payable — Job {$job->job_no} ({$job->billableVehicleCount()} vehicle(s)) — Bill {$billNo}",
+                            ]);
+                            DailyJob::whereKey($job->id)->update(['pty_voucher_id' => $ptyVoucher->id]);
+                        }
+                    }
+                }
+
                 return $bill;
             });
 
-            return redirect()->route('bills.index')->with('success', "Bill {$bill->bill_no} created successfully.");
+            $redirect = redirect()->route('bills.index')->with('success', "Bill {$bill->bill_no} created successfully.");
+            if ($warnings) {
+                $redirect->with('error', 'Heads up: ' . implode(' ', $warnings));
+            }
+
+            return $redirect;
 
         } catch (\Throwable $e) {
             Log::error('[Bill] Store error', ['message' => $e->getMessage(), 'trace' => $e->getTraceAsString()]);
@@ -250,7 +303,13 @@ class BillController extends Controller
                     }
                 }
 
-                DailyJob::where('bill_id', $bill->id)->update(['bill_id' => null]);
+                // Reverse the vendor-payable vouchers posted for this bill's
+                // Party-to-Party jobs, then release the jobs.
+                $ptyVoucherIds = DailyJob::where('bill_id', $bill->id)->whereNotNull('pty_voucher_id')->pluck('pty_voucher_id');
+                if ($ptyVoucherIds->isNotEmpty()) {
+                    Voucher::whereIn('id', $ptyVoucherIds)->delete();
+                }
+                DailyJob::where('bill_id', $bill->id)->update(['bill_id' => null, 'pty_voucher_id' => null]);
                 if ($bill->voucher_id) {
                     Voucher::whereKey($bill->voucher_id)->delete();
                 }
@@ -268,7 +327,6 @@ class BillController extends Controller
     // Print — Bill PDF itemising the jobs it aggregates.
     public function print($id)
     {
-
         $bill = Bill::with([
             'customer', 'company', 'creator',
             'jobs.vehicles.vehicle', 'jobs.vehicles.deliveryChallan', 'jobs.ptyVehicles', 'jobs.route', 'jobs.vendor',
@@ -279,7 +337,7 @@ class BillController extends Controller
         $pdf->setPrintFooter(false);
         $pdf->SetCreator('MMMTS');
         $pdf->SetAuthor('Your Company');
-        $pdf->SetTitle($bill->bill_no);
+        $pdf->SetTitle('Bill ' . $bill->bill_no);
         $pdf->SetMargins(10, 10, 10);
         $pdf->AddPage();
         $pdf->setCellPadding(1.5);
@@ -333,11 +391,11 @@ class BillController extends Controller
         $infoHtml = '
         <table cellpadding="3" cellspacing="0" width="100%">
             <tr>
-                <td width="50%">
+                <td width="60%">
                     <b>' . e($bill->customer->name ?? '') . '</b><br>
                     ' . e($bill->customer->address ?? '') . '
                 </td>
-                <td width="50%">
+                <td width="40%">
                     <table border="1" cellpadding="4" cellspacing="0" style="font-size:10px;">
                         <tr><td width="40%"><b>Bill No.</b></td><td width="60%">' . e($bill->bill_no) . '</td></tr>
                         <tr><td width="40%"><b>Bill Date</b></td><td width="60%">' . $bill->bill_date->format('d-m-Y') . '</td></tr>
@@ -420,10 +478,8 @@ class BillController extends Controller
         // that has more than one vehicle, a small note under the row label
         // spells out the working — charge per vehicle × number of vehicles —
         // so the per-vehicle figure isn't lost. Single-vehicle jobs need no
-        // note of their own (per vehicle == total); when a bill mixes both,
-        // their combined share is appended so the note still adds up. With
-        // several jobs on the bill each note is tagged with its job no.; with
-        // one job it isn't, to keep it short.
+        // note (per vehicle == total). With several jobs on the bill each
+        // note is tagged with its job no.; with one job it isn't, to keep it short.
         $multipleJobs = $bill->jobs->count() > 1;
         $breakdownRow = function (string $label, callable $perVehicleOf) use ($bill, $multipleJobs) {
             $total       = 0;
@@ -494,7 +550,7 @@ class BillController extends Controller
                 $vehicleRowsHtml .= '<tr>
                     <td>' . $vi . '</td>
                     <td>' . e($job->job_no) . '</td>
-                    <td>' . e($line->vehicle->name ?? '') . '</td>
+                    <td>' . e($line->vehicle->name ?? '') . ' (' . e($line->vehicle->vehicle_no ?? '') . ')</td>
                     <td>' . e($line->container_no ?? '—') . '</td>
                     <td>' . e($line->deliveryChallan->dc_no ?? '—') . '</td>
                 </tr>';
@@ -522,6 +578,10 @@ class BillController extends Controller
         if (!empty($bill->remarks)) {
             $pdf->writeHTML('<b>Remarks:</b><br><span style="font-size:12px;">' . nl2br(e($bill->remarks)) . '</span>', true, false, true, false, '');
         }
+
+        // If the content above has filled the page, start the signature block
+        // on a fresh page as a whole instead of letting the line and its
+        // "Prepared By / Authorized By" labels split across pages.
         if ($pdf->GetY() + 32 > $pdf->getPageHeight() - $pdf->getBreakMargin()) {
             $pdf->AddPage();
         }
