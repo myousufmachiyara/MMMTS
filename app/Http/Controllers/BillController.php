@@ -12,6 +12,7 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
+use App\Support\DocumentNumber;
 
 class BillController extends Controller
 {
@@ -97,16 +98,9 @@ class BillController extends Controller
         return response()->json($jobs);
     }
 
-    private function nextBillNo(): string
+    private function nextBillNo($billDate): string
     {
-        $last = Bill::withTrashed()
-            ->where('bill_no', 'like', 'BILL-%')
-            ->pluck('bill_no')
-            ->map(fn ($no) => (int) substr($no, 5))
-            ->sort()
-            ->last();
-
-        return 'BILL-' . str_pad(($last ?? 0) + 1, 6, '0', STR_PAD_LEFT);
+        return DocumentNumber::next(Bill::class, 'bill_no', 'bill', $billDate);
     }
 
     private function revenueAccountId(): ?int
@@ -177,7 +171,7 @@ class BillController extends Controller
                 // of the combined grand totals of the bills it aggregates (item 13).
                 $total = round($tripPlanSubtotal + $otherChargesSubtotal, 2);
 
-                $billNo = $this->nextBillNo();
+                $billNo = $this->nextBillNo($data['bill_date']);
 
                 // Auto-post: Dr Customer (Receivable) / Cr Sales Revenue
                 $voucher = null;
@@ -595,7 +589,6 @@ class BillController extends Controller
         $pdf->Cell($lineWidth, 6, 'Prepared By', 0, 0, 'C');
         $pdf->SetXY(130, $yPos + 2);
         $pdf->Cell($lineWidth, 6, 'Authorized By', 0, 0, 'C');
-
-        return $pdf->Output('bill_' . $bill->bill_no . '.pdf', 'I');
+        return $pdf->Output('bill_' . str_replace('/', '-', $bill->bill_no) . '.pdf', 'I');
     }
 }

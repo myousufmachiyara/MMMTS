@@ -10,6 +10,7 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
+use App\Support\DocumentNumber;
 
 class InvoiceController extends Controller
 {
@@ -69,16 +70,9 @@ class InvoiceController extends Controller
         return response()->json($bills);
     }
 
-    private function nextInvoiceNo(): string
+    private function nextInvoiceNo($invoiceDate): string
     {
-        $last = Invoice::withTrashed()
-            ->where('invoice_no', 'like', 'INV-%')
-            ->pluck('invoice_no')
-            ->map(fn ($no) => (int) substr($no, 4))
-            ->sort()
-            ->last();
-
-        return 'INV-' . str_pad(($last ?? 0) + 1, 6, '0', STR_PAD_LEFT);
+        return DocumentNumber::next(Invoice::class, 'invoice_no', 'invoice', $invoiceDate);
     }
 
     private function taxPayableAccountId(): ?int
@@ -169,7 +163,7 @@ class InvoiceController extends Controller
                 }
 
                 $invoice = Invoice::create([
-                    'invoice_no'         => $this->nextInvoiceNo(),
+                    'invoice_no'         => $this->nextInvoiceNo($data['invoice_date']),
                     'customer_id'        => $data['customer_id'],
                     'invoice_date'       => $data['invoice_date'],
                     'from_date'          => $data['from_date'],
@@ -429,7 +423,6 @@ class InvoiceController extends Controller
         $pdf->Cell($lineWidth, 6, 'Prepared By', 0, 0, 'C');
         $pdf->SetXY(130, $yPos + 2);
         $pdf->Cell($lineWidth, 6, 'Authorized By', 0, 0, 'C');
-
-        return $pdf->Output('invoice_' . $invoice->invoice_no . '.pdf', 'I');
+        return $pdf->Output('invoice_' . str_replace('/', '-', $invoice->invoice_no) . '.pdf', 'I');
     }
 }
