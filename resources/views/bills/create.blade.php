@@ -197,7 +197,7 @@ function recalcTotals() {
         count += isNaN(parseInt(cb.dataset.vehicles, 10)) ? 1 : parseInt(cb.dataset.vehicles, 10);
     });
     var total = tripSum + otherSum;
-
+    
     document.getElementById('sumDetention').textContent = fmt(detentionSum);
     document.getElementById('sumOther').textContent = fmt(otherSum);
     document.getElementById('sumTotal').textContent = fmt(total);

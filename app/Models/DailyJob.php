@@ -70,6 +70,11 @@ class DailyJob extends Model
         'pty_guarantee',
         'pty_balance',
         'pty_voucher_id', // vendor-payable voucher posted when the job's Bill was created
+        'mq_advance',            // advance PER VEHICLE (× vehicle count = total advance)
+        'mq_guarantee',          // guarantee PER VEHICLE (× vehicle count = total guarantee)
+        'mq_advance_account_id', // cash / bank account the advance was received into
+        'mq_advance_voucher_id', // receipt voucher posted for the advance
+
         // ── Delivery Challan (Direct jobs only — proof our vehicle delivered/
         // received the container). Snapshot fields living on the job itself
         // rather than a separate module, since a DC carries no accounting
@@ -101,6 +106,51 @@ class DailyJob extends Model
         return $this->hasMany(DailyJobMadqamLine::class)->orderBy('id');
     }
 
+        public function advanceAccount()
+    {
+        return $this->belongsTo(ChartOfAccounts::class, 'mq_advance_account_id');
+    }
+
+    // Muqadum money. Rent is per vehicle (each line's amount); advance and
+    // guarantee are entered ONCE per vehicle and multiplied by the number of
+    // vehicles. job_total (what the Bill picks up) = total rent + total
+    // guarantee; the balance still receivable from the customer = that total
+    // minus the total advance already received.
+    private function mqLines()
+    {
+        return $this->relationLoaded('madqamLines') ? $this->madqamLines : $this->madqamLines()->get();
+    }
+
+    public function getMqVehicleCountAttribute(): int
+    {
+        return $this->mqLines()->count();
+    }
+
+    public function getMqTotalRentAttribute(): float
+    {
+        return round((float) $this->mqLines()->sum('amount'), 2);
+    }
+
+    public function getMqTotalAdvanceAttribute(): float
+    {
+        return round((float) $this->mq_advance * $this->mq_vehicle_count, 2);
+    }
+
+    public function getMqTotalGuaranteeAttribute(): float
+    {
+        return round((float) $this->mq_guarantee * $this->mq_vehicle_count, 2);
+    }
+
+    public function getMqTotalAttribute(): float
+    {
+        return round($this->mq_total_rent + $this->mq_total_guarantee, 2);
+    }
+
+    public function getMqBalanceAttribute(): float
+    {
+        return round($this->mq_total - $this->mq_total_advance, 2);
+    }
+    
     // "TLR-1, TLR-2" — the vehicles on a Madqam job, for lists and the bill
     // picker. Expects madqamLines.vehicle to be loaded to avoid N+1.
     public function getMadqamVehicleListAttribute(): string

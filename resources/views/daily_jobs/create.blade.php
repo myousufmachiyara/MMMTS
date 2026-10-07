@@ -20,8 +20,7 @@
     </div>
 @endif
 
-<h2 class="mb-3">Add Daily Job — {{ $type === 'party_to_party' ? 'Party-to-Party' : 'Direct' }}</h2>
-
+<h2 class="mb-3">Add Daily Job — {{ $type === 'party_to_party' ? 'Party-to-Party' : ($type === 'madqam' ? 'Muqadum' : 'Direct') }}</h2>
 @if($type === 'party_to_party')
     @include('daily_jobs._form_pty')
 @elseif($type === 'madqam')

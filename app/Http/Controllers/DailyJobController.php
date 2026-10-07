@@ -13,6 +13,8 @@ use App\Models\VehicleRoute;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use App\Models\Voucher;
+use Illuminate\Validation\Rule;
 
 class DailyJobController extends Controller
 {
@@ -70,6 +72,7 @@ class DailyJobController extends Controller
             'ports'             => Port::where('is_active', true)->orderBy('name')->get(),
             'customerLocations' => CustomerLocation::where('is_active', true)->get(['id', 'customer_id', 'location_name']),
             'canFillRates'      => $this->canFillRates(),
+            'cashBankAccounts'  => ChartOfAccounts::whereIn('account_type', ['cash', 'bank'])->orderBy('name')->get(),
         ];
     }
 
@@ -438,62 +441,81 @@ class DailyJobController extends Controller
             ->update(['daily_job_id' => null]);
     }
 
-        private function madqamRules(): array
+    private function madqamRules(): array
     {
         return [
             'date'        => 'required|date',
             'customer_id' => 'required|exists:chart_of_accounts,id',
             'remarks'     => 'nullable|string|max:1000',
-            // The vehicle grid: one row per hired-out vehicle.
-            'vehicles'                => 'required|array|min:1',
-            'vehicles.*.vehicle_id'   => 'required|exists:vehicles,id',
-            'vehicles.*.rate_per_day' => 'required|numeric|min:0',
-            'vehicles.*.days'         => 'required|numeric|min:0.01|max:9999',
+            // The vehicle grid: one row per vehicle, each with its rent.
+            'vehicles'              => 'required|array|min:1',
+            'vehicles.*.vehicle_id' => 'required|exists:vehicles,id',
+            'vehicles.*.rent'       => 'required|numeric|min:0',
+            // Advance and guarantee are entered PER VEHICLE (× vehicle count).
+            'advance'    => 'nullable|numeric|min:0',
+            'guarantee'  => 'nullable|numeric|min:0',
+            // Where the advance was received — a cash or bank account.
+            'advance_account_id' => ['nullable', Rule::exists('chart_of_accounts', 'id')->whereIn('account_type', ['cash', 'bank'])],
         ];
     }
 
-    // Madqam — the simplest job: date, customer, remarks, and a grid of OUR
-    // vehicles each with a rate per day and a number of days. Each line's
-    // amount is rate × days; the job's total (job_total — what the Bill picks
-    // up) is the sum of the lines. There's no route/trip plan/charges/DC, and
-    // no assistant/admin "incomplete" step, so it is 'complete' from the start
-    // (like Party-to-Party). Amounts are always recomputed here from rate and
-    // days — never trusted from the browser.
+    // Muqadum (job_type 'madqam' in the database) — the simplest job: date,
+    // customer, remarks, a grid of OUR vehicles each with a rent, and an
+    // advance + guarantee entered per vehicle.
+    //   total rent      = sum of the vehicles' rents
+    //   total advance   = advance   × number of vehicles
+    //   total guarantee = guarantee × number of vehicles
+    //   job_total       = total rent + total guarantee   (what the Bill picks up)
+    //   balance         = job_total − total advance      (still receivable)
+    // There's no route/trip plan/charges/DC and no assistant/admin
+    // "incomplete" step, so it is 'complete' from the start (like
+    // Party-to-Party). Every figure is recomputed here — never trusted from
+    // the browser. The advance is also posted as a receipt voucher
+    // (Dr cash/bank, Cr customer) the moment the job is saved.
     private function persistMadqam(Request $request, ?DailyJob $job = null)
     {
         // A grid row left completely blank (an extra "Add Vehicle" click) is
         // dropped instead of failing validation.
         $request->merge(['vehicles' => array_values(array_filter(
             (array) $request->input('vehicles', []),
-            fn ($row) => is_array($row) && trim(($row['vehicle_id'] ?? '') . ($row['rate_per_day'] ?? '') . ($row['days'] ?? '')) !== ''
+            fn ($row) => is_array($row) && trim(($row['vehicle_id'] ?? '') . ($row['rent'] ?? '')) !== ''
         ))]);
 
         $data = $request->validate($this->madqamRules());
 
-        $lines = array_map(function ($row) {
-            $rate = round((float) $row['rate_per_day'], 2);
-            $days = round((float) $row['days'], 2);
+        $advancePerVehicle   = round((float) ($data['advance'] ?? 0), 2);
+        $guaranteePerVehicle = round((float) ($data['guarantee'] ?? 0), 2);
 
-            return [
-                'vehicle_id'   => (int) $row['vehicle_id'],
-                'rate_per_day' => $rate,
-                'days'         => $days,
-                'amount'       => round($rate * $days, 2),
-            ];
-        }, $data['vehicles']);
+        // An advance has to say which cash/bank account it went into.
+        if ($advancePerVehicle > 0 && empty($data['advance_account_id'])) {
+            throw \Illuminate\Validation\ValidationException::withMessages([
+                'advance_account_id' => 'Select the cash or bank account the advance was received in.',
+            ]);
+        }
 
-        $total = round(array_sum(array_column($lines, 'amount')), 2);
+        $lines = array_map(fn ($row) => [
+            'vehicle_id' => (int) $row['vehicle_id'],
+            'amount'     => round((float) $row['rent'], 2),
+        ], $data['vehicles']);
+
+        $vehicleCount   = count($lines);
+        $totalRent      = round(array_sum(array_column($lines, 'amount')), 2);
+        $totalGuarantee = round($guaranteePerVehicle * $vehicleCount, 2);
+        $totalAdvance   = round($advancePerVehicle * $vehicleCount, 2);
 
         $payload = [
-            'date'            => $data['date'],
-            'customer_id'     => $data['customer_id'],
-            'remarks'         => $data['remarks'] ?? null,
-            'trip_plan_total' => 0,
-            'job_total'       => $total,
-            'updated_by'      => auth()->id(),
+            'date'                  => $data['date'],
+            'customer_id'           => $data['customer_id'],
+            'remarks'               => $data['remarks'] ?? null,
+            'trip_plan_total'       => 0,
+            'job_total'             => round($totalRent + $totalGuarantee, 2),
+            'mq_advance'            => $advancePerVehicle,
+            'mq_guarantee'          => $guaranteePerVehicle,
+            'mq_advance_account_id' => $advancePerVehicle > 0 ? (int) $data['advance_account_id'] : null,
+            'updated_by'            => auth()->id(),
         ];
 
-        return DB::transaction(function () use ($job, $payload, $lines) {
+        return DB::transaction(function () use ($job, $payload, $lines, $vehicleCount, $totalAdvance, $advancePerVehicle) {
             if ($job) {
                 $job->update($payload);
             } else {
@@ -510,8 +532,44 @@ class DailyJobController extends Controller
             $job->madqamLines()->delete();
             $job->madqamLines()->createMany($lines);
 
+            $this->syncMuqadumAdvanceVoucher($job, $totalAdvance, $vehicleCount, $advancePerVehicle);
+
             return $job;
         });
+    }
+
+    // Keeps the advance's receipt voucher (Dr cash/bank account, Cr customer)
+    // in step with the job: created when an advance first appears, updated
+    // when the job is edited, removed when the advance is cleared (and, in
+    // destroy(), when the job is deleted).
+    private function syncMuqadumAdvanceVoucher(DailyJob $job, float $totalAdvance, int $vehicleCount, float $perVehicle): void
+    {
+        $voucher = $job->mq_advance_voucher_id ? Voucher::find($job->mq_advance_voucher_id) : null;
+
+        if ($totalAdvance <= 0 || !$job->mq_advance_account_id) {
+            if ($voucher) {
+                $voucher->delete();
+            }
+            $job->update(['mq_advance_voucher_id' => null]);
+            return;
+        }
+
+        $fields = [
+            'voucher_type' => 'receipt',
+            'date'         => $job->date,
+            'ac_dr_sid'    => $job->mq_advance_account_id,
+            'ac_cr_sid'    => $job->customer_id,
+            'amount'       => $totalAdvance,
+            'reference'    => $job->job_no,
+            'remarks'      => "Advance received — Muqadum Job {$job->job_no} ({$vehicleCount} vehicle(s) × " . number_format($perVehicle, 2) . ')',
+        ];
+
+        if ($voucher) {
+            $voucher->update($fields);
+        } else {
+            $voucher = Voucher::create($fields);
+            $job->update(['mq_advance_voucher_id' => $voucher->id]);
+        }
     }
 
     // Party-to-Party (Vendor to Customer directly) — simple ledger-style row,
@@ -665,6 +723,9 @@ class DailyJobController extends Controller
             if ($job->bill_id) {
                 return redirect()->back()->with('error', 'This job is already on a bill and cannot be deleted.');
             }
+            if ($job->mq_advance_voucher_id) {
+                Voucher::whereKey($job->mq_advance_voucher_id)->delete();
+            }
 
             $job->delete();
 
@@ -684,7 +745,7 @@ class DailyJobController extends Controller
         // print()
         $job = DailyJob::with([
             'customer', 'vendor',
-             'madqamLines.vehicle', 
+            'madqamLines.vehicle', 'advanceAccount',
             'route', 'pickupPort', 'dropoffPort', 'destinationLocation', 'sharedExtraPortCharges.port',
             'vehicles.vehicle', 'vehicles.deliveryChallan', 'ptyVehicles', 'creator',
         ])->findOrFail($id);
@@ -733,7 +794,7 @@ class DailyJobController extends Controller
                     <table border="1" cellpadding="4" cellspacing="0" style="font-size:10px;">
                         <tr><td width="40%"><b>Job No.</b></td><td width="60%">' . e($job->job_no) . e($statusLabel) . '</td></tr>
                         <tr><td width="40%"><b>Date</b></td><td width="60%">' . $job->date->format('d-m-Y') . '</td></tr>
-                        <tr><td width="40%"><b>Type</b></td><td width="60%">' . ($job->job_type === 'party_to_party' ? 'Party-to-Party' : ($job->job_type === 'madqam' ? 'Madqam' : 'Direct')) . '</td></tr>
+                        <tr><td width="40%"><b>Type</b></td><td width="60%">' . ($job->job_type === 'party_to_party' ? 'Party-to-Party' : ($job->job_type === 'madqam' ? 'Muqadum' : 'Direct')) . '</td></tr>
                         <tr><td width="40%"><b>Created By</b></td><td width="60%">' . e($job->creator->name ?? '—') . '</td></tr>
                     </table>
                 </td>
@@ -742,7 +803,8 @@ class DailyJobController extends Controller
         $pdf->writeHTML($infoHtml, true, false, false, false, '');
         $pdf->Ln(3);
         if ($job->job_type === 'madqam') {
-            // Vehicle grid: vehicle, rate per day, days, line total — then the job total.
+            // Vehicles with their rent, then the money summary:
+            // total (rent + guarantee), advance received, balance receivable.
             $pdf->SetFont('helvetica', 'B', 10);
             $pdf->Cell(0, 6, 'Vehicles (' . $job->madqamLines->count() . ')', 0, 1, 'L');
             $pdf->SetFont('helvetica', '', 10);
@@ -752,22 +814,33 @@ class DailyJobController extends Controller
                 $rowsHtml .= '<tr>
                     <td align="center">' . ($mi + 1) . '</td>
                     <td align="left">' . e($ml->vehicle->name ?? '') . ' (' . e($ml->vehicle->vehicle_no ?? '') . ')</td>
-                    <td align="right">' . number_format($ml->rate_per_day, 2) . '</td>
-                    <td align="right">' . e($ml->days_label) . '</td>
                     <td align="right">' . number_format($ml->amount, 2) . '</td>
                 </tr>';
             }
             $mqHtml = '
             <table border="0.3" cellpadding="4" cellspacing="0" width="100%" style="font-size:10px;">
                 <tr style="background-color:#f5f5f5;font-weight:bold;">
-                    <th width="8%" align="center">#</th><th width="37%">Vehicle</th><th width="20%" align="right">Rate / Day</th><th width="15%" align="right">No. of Days</th><th width="20%" align="right">Total</th>
+                    <th width="10%" align="center">#</th><th width="60%">Vehicle</th><th width="30%" align="right">Rent</th>
                 </tr>' . $rowsHtml . '
                 <tr style="background-color:#f5f5f5;">
-                    <td colspan="4" align="right"><b>Total Amount</b></td>
-                    <td align="right"><b>' . number_format($job->job_total, 2) . '</b></td>
+                    <td colspan="2" align="right"><b>Total Rent</b></td>
+                    <td align="right"><b>' . number_format($job->mq_total_rent, 2) . '</b></td>
                 </tr>
             </table>';
             $pdf->writeHTML($mqHtml, true, false, true, false, '');
+            $pdf->Ln(3);
+
+            $n = $job->mq_vehicle_count;
+            $advAccount = $job->advanceAccount->name ?? null;
+            $sumHtml = '
+            <table border="0.3" cellpadding="4" cellspacing="0" width="100%" style="font-size:10px;">
+                <tr><td width="70%" align="left">Total Rent</td><td width="30%" align="right">' . number_format($job->mq_total_rent, 2) . '</td></tr>
+                <tr><td align="left">Guarantee (' . number_format($job->mq_guarantee, 2) . ' × ' . $n . ' vehicle(s))</td><td align="right">' . number_format($job->mq_total_guarantee, 2) . '</td></tr>
+                <tr style="background-color:#f5f5f5;font-weight:bold;"><td align="left">Total (Rent + Guarantee)</td><td align="right">' . number_format($job->mq_total, 2) . '</td></tr>
+                <tr><td align="left">Less: Advance Received (' . number_format($job->mq_advance, 2) . ' × ' . $n . ' vehicle(s))' . ($advAccount ? '<br><span style="font-size:8px;color:#555555;">received in ' . e($advAccount) . '</span>' : '') . '</td><td align="right">' . number_format($job->mq_total_advance, 2) . '</td></tr>
+                <tr style="background-color:#f5f5f5;font-weight:bold;"><td align="left">Balance Receivable (Total - Advance)</td><td align="right">' . number_format($job->mq_balance, 2) . '</td></tr>
+            </table>';
+            $pdf->writeHTML($sumHtml, true, false, true, false, '');
         }
         elseif  ($job->job_type === 'party_to_party') {
             $html = '

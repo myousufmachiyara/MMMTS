@@ -25,7 +25,7 @@
         @can('daily_jobs.create')
           <div>
             <a href="{{ route('daily-jobs.create', ['type' => 'madqam']) }}" class="btn btn-outline-secondary">
-              <i class="fas fa-plus"></i> Add Madqam Job
+             <i class="fas fa-plus"></i> Add Muqadum Job
             </a>
             <a href="{{ route('daily-jobs.create', ['type' => 'direct']) }}" class="btn btn-primary">
               <i class="fas fa-plus"></i> Add Direct Job
@@ -103,7 +103,7 @@
                   <td><code>{{ $row->job_no }}</code></td>
                   <td>
                     <span class="badge {{ $row->job_type === 'party_to_party' ? 'bg-info' : ($row->job_type === 'madqam' ? 'bg-secondary' : 'bg-primary') }}">
-                        {{ $row->job_type === 'party_to_party' ? 'Party-to-Party' : ($row->job_type === 'madqam' ? 'Madqam' : 'Direct') }}
+                        {{ $row->job_type === 'party_to_party' ? 'Party-to-Party' : ($row->job_type === 'madqam' ? 'Muqadum' : 'Direct') }}
                     </span>
                     
                   </td>
@@ -127,6 +127,7 @@
                     @endif
                   </td>
                   <td>{{ $row->customer->name ?? '—' }}</td>
+                  
                   <td>{{ $row->job_type === 'madqam' ? '—' : ($row->job_type === 'party_to_party' ? ($row->pty_destination ?? '—') : ($row->route->name ?? ($row->vehicles->pluck('route.name')->filter()->implode(', ') ?: '—'))) }}</td>
                   <td class="text-end">{{ number_format($row->job_total, 2) }}</td>
                   <td>

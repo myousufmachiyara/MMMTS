@@ -73,7 +73,7 @@ class BillController extends Controller
                     'job_type'                 => $job->job_type,
                     'date'                     => $job->date->format('Y-m-d'),
                     'vehicle'                  => $isPty ? ($job->pty_vehicle_list ?: '—') : ($isMq ? ($job->madqam_vehicle_list ?: '—') : ($job->vehicles->pluck('vehicle.name')->filter()->implode(', ') ?: '—')),
-                    'route'                    => $isPty ? ($job->pty_destination ?? '—') : ($isMq ? 'Madqam' : ($job->route->name ?? ($job->vehicles->pluck('route.name')->filter()->implode(', ') ?: '—'))),
+                    'route'                    => $isPty ? ($job->pty_destination ?? '—') : ($isMq ? 'Muqadum' : ($job->route->name ?? ($job->vehicles->pluck('route.name')->filter()->implode(', ') ?: '—'))),
                     'vendor'                   => $isPty ? ($job->vendor->name ?? '—') : null,
                     'trip_plan_total'          => (float) $job->trip_plan_total,
                     'detention_charges_total'  => (float) $job->detention_charges_total,
@@ -433,7 +433,7 @@ class BillController extends Controller
                 <td>' . e($job->job_no) . '</td>
                 <td>' . $job->date->format('d-m-Y') . '</td>
                 <td>' . e($isPty ? ($job->vendor->name ?? '—') : ($isMq ? ($job->madqam_vehicle_list ?: '—') : ($job->vehicles->pluck('vehicle.name')->filter()->implode(', ') ?: '—'))) . '</td>
-                <td>' . e($isPty ? ($job->pty_destination ?? '—') : ($isMq ? 'Madqam' : ($job->route->name ?? ($job->vehicles->pluck('route.name')->filter()->implode(', ') ?: '—')))) . '</td>
+                <td>' . e($isPty ? ($job->pty_destination ?? '—') : ($isMq ? 'Muqadum' : ($job->route->name ?? ($job->vehicles->pluck('route.name')->filter()->implode(', ') ?: '—')))) . '</td>
                 <td align="right">' . number_format($detentionPerVehicle, 2) . $detDateNote . $perNote . '</td>
                 <td align="right">' . number_format($job->other_charges_per_vehicle, 2) . $perNote . '</td>
                 <td align="right">' . number_format($job->bill_amount, 2) . $totalNote . '</td>
@@ -542,9 +542,34 @@ class BillController extends Controller
                     . e($ml->vehicle->name ?? '') . ' ' . number_format($ml->rate_per_day, 2) . ' × ' . $ml->days_label . ' day(s) = ' . number_format($ml->amount, 2);
             }
         }
-        $madqamRowHtml = $madqamTotal > 0
-            ? '<tr><td width="80%" align="left">Madqam (Vehicle Hire)<br><span style="font-size:8px;color:#555555;">' . implode('; ', $madqamNotes) . '</span></td><td width="20%">' . number_format($madqamTotal, 2) . '</td></tr>'
-            : '';
+                // Muqadum jobs (vehicle hire) have none of the charges above. Their
+        // rent and guarantee each get one row here (with the per-vehicle
+        // working underneath), so the breakdown still adds up to the bill
+        // total; the advance and balance follow in a small summary below.
+        $mqRent = $mqGuarantee = $mqAdvance = 0;
+        $mqRentNotes = $mqGuaranteeNotes = [];
+        foreach ($bill->jobs as $job) {
+            if ($job->job_type !== 'madqam') {
+                continue;
+            }
+            $tag = $multipleJobs ? e($job->job_no) . ': ' : '';
+            $mqRent      += $job->mq_total_rent;
+            $mqGuarantee += $job->mq_total_guarantee;
+            $mqAdvance   += $job->mq_total_advance;
+            $mqRentNotes[] = $tag . $job->madqamLines
+                ->map(fn ($ml) => e($ml->vehicle->name ?? '') . ' ' . number_format($ml->amount, 2))
+                ->implode(', ');
+            if ($job->mq_total_guarantee > 0) {
+                $mqGuaranteeNotes[] = $tag . number_format($job->mq_guarantee, 2) . ' per vehicle × ' . $job->mq_vehicle_count . ' vehicles';
+            }
+        }
+        $madqamRowHtml = '';
+        if ($mqRent > 0 || $mqGuarantee > 0) {
+            $madqamRowHtml .= '<tr><td width="80%" align="left">Muqadum Rent<br><span style="font-size:8px;color:#555555;">' . implode('; ', $mqRentNotes) . '</span></td><td width="20%">' . number_format($mqRent, 2) . '</td></tr>';
+            if ($mqGuarantee > 0) {
+                $madqamRowHtml .= '<tr><td width="80%" align="left">Muqadum Guarantee<br><span style="font-size:8px;color:#555555;">' . implode('; ', $mqGuaranteeNotes) . '</span></td><td width="20%">' . number_format($mqGuarantee, 2) . '</td></tr>';
+            }
+        }
         $breakdownHtml = '
         <table border="0.3" cellpadding="4" cellspacing="0" width="100%" style="text-align:right;font-size:10px;">'
             . $breakdownRow('Rent',                  fn ($job) => $isPtyJob($job) ? 0 : $job->rent)
@@ -558,7 +583,18 @@ class BillController extends Controller
         . '</table>';
         $pdf->writeHTML($breakdownHtml, true, false, true, false, '');
         $pdf->Ln(4);
-
+         if ($mqRent > 0 || $mqGuarantee > 0) {
+            $pdf->SetFont('helvetica', 'B', 10);
+            $pdf->Cell(0, 6, 'Muqadum Summary', 0, 1, 'L');
+            $mqSummaryHtml = '
+            <table border="0.3" cellpadding="4" cellspacing="0" width="100%" style="text-align:right;font-size:10px;">
+                <tr><td width="80%" align="left">Muqadum Total (Rent + Guarantee)</td><td width="20%">' . number_format($mqRent + $mqGuarantee, 2) . '</td></tr>
+                <tr><td width="80%" align="left">Less: Advance Received</td><td width="20%">' . number_format($mqAdvance, 2) . '</td></tr>
+                <tr style="font-weight:bold;background-color:#f5f5f5;"><td width="80%" align="left">Balance (Total - Advance)</td><td width="20%">' . number_format($mqRent + $mqGuarantee - $mqAdvance, 2) . '</td></tr>
+            </table>';
+            $pdf->writeHTML($mqSummaryHtml, true, false, true, false, '');
+            $pdf->Ln(4);
+        }
         // Item 10 — every vehicle across every job on this bill (matching
         // the Job Slip's own Vehicles table), rather than the collapsed
         // comma-separated list in the "Vehicle / Vendor" column above.
@@ -573,7 +609,7 @@ class BillController extends Controller
                     $vehicleRowsHtml .= '<tr>
                     <td>' . $vi . '</td>
                     <td>' . e($job->job_no) . '</td>
-                    <td>' . e($ml->vehicle->name ?? '') . ' (' . e($ml->vehicle->vehicle_no ?? '') . ')<br><span style="font-size:7px;color:#555555;">' . number_format($ml->rate_per_day, 2) . ' × ' . e($ml->days_label) . ' day(s)</span></td>
+                    <td>' . e($ml->vehicle->name ?? '') . ' (' . e($ml->vehicle->vehicle_no ?? '') . ')<br><span style="font-size:7px;color:#555555;">rent ' . number_format($ml->amount, 2) . '</span></td>
                     <td>—</td>
                     <td>—</td>
                 </tr>';
