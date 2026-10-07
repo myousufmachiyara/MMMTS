@@ -11,13 +11,13 @@
     <ul class="nav nav-tabs" id="fleetReportTabs" role="tablist">
         @foreach ([
             'vehicle_wise'    => 'Vehicle Wise',
+            'vehicle_ledger'  => 'Vehicle Ledger',
             'customer_wise'   => 'Customer Wise',
             'vendor_wise'     => 'Vendor Wise (Party-to-Party)',
             'route_wise'      => 'Route Wise',
             'customer_routes' => 'Customer × Route Usage',
             'company_share'   => 'Company % Share',
             'vehicle_pl'      => 'Vehicle P&L',
-            'vehicle_ledger'  => 'Vehicle Ledger',
         ] as $key => $label)
             <li class="nav-item">
                 <a class="nav-link {{ $loop->first ? 'active' : '' }}"
