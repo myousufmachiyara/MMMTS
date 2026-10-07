@@ -331,7 +331,7 @@ class BillController extends Controller
         $pdf->setPrintFooter(false);
         $pdf->SetCreator('MMMTS');
         $pdf->SetAuthor('Your Company');
-        $pdf->SetTitle('Bill ' . $bill->bill_no);
+        $pdf->SetTitle($bill->bill_no);
         $pdf->SetMargins(10, 10, 10);
         $pdf->AddPage();
         $pdf->setCellPadding(1.5);
@@ -385,11 +385,11 @@ class BillController extends Controller
         $infoHtml = '
         <table cellpadding="3" cellspacing="0" width="100%">
             <tr>
-                <td width="60%">
+                <td width="50%">
                     <b>' . e($bill->customer->name ?? '') . '</b><br>
                     ' . e($bill->customer->address ?? '') . '
                 </td>
-                <td width="40%">
+                <td width="50%">
                     <table border="1" cellpadding="4" cellspacing="0" style="font-size:10px;">
                         <tr><td width="40%"><b>Bill No.</b></td><td width="60%">' . e($bill->bill_no) . '</td></tr>
                         <tr><td width="40%"><b>Bill Date</b></td><td width="60%">' . $bill->bill_date->format('d-m-Y') . '</td></tr>
@@ -576,7 +576,7 @@ class BillController extends Controller
                 $vehicleRowsHtml .= '<tr>
                     <td>' . $vi . '</td>
                     <td>' . e($job->job_no) . '</td>
-                    <td>' . e($line->vehicle->name ?? '') . ' (' . e($line->vehicle->vehicle_no ?? '') . ')</td>
+                    <td>' . e($line->vehicle->name ?? '') .'</td>
                     <td>' . e($line->container_no ?? '—') . '</td>
                     <td>' . e($line->deliveryChallan->dc_no ?? '—') . '</td>
                 </tr>';
