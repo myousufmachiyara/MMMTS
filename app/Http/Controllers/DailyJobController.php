@@ -613,7 +613,7 @@ class DailyJobController extends Controller
         $pdf->setPrintFooter(false);
         $pdf->SetCreator('MMMTS');
         $pdf->SetAuthor('Your Company');
-        $pdf->SetTitle('Job ' . $job->job_no);
+        $pdf->SetTitle($job->job_no);
         $pdf->SetMargins(10, 10, 10);
         $pdf->AddPage();
         $pdf->setCellPadding(1.5);
@@ -801,7 +801,7 @@ class DailyJobController extends Controller
         $pdf->SetXY(130, $yPos + 2);
         $pdf->Cell($lineWidth, 6, 'Authorized By', 0, 0, 'C');
 
-        return $pdf->Output('job_' . $job->job_no . '.pdf', 'I');
+        return $pdf->Output($job->job_no . '.pdf', 'I');
     }
 
     // ── Legacy Delivery Challan (pre-rewrite direct jobs only) ─────────
