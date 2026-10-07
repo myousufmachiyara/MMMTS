@@ -36,7 +36,7 @@ class DailyJobController extends Controller
         // column below can distinguish a job that's still waiting on the DC
         // that spawned it (item 1) from one with no DC at all, without an
         // N+1 (see DailyJob::getPendingDeliveryChallanAttribute()).
-        $query = DailyJob::with(['vehicles.vehicle', 'ptyVehicles', 'route', 'customer', 'vendor', 'pickupPort', 'dropoffPort', 'deliveryChallans.vehicleLine']);
+        $query = DailyJob::with(['vehicles.vehicle', 'ptyVehicles', 'madqamLines.vehicle', 'route', 'customer', 'vendor', 'pickupPort', 'dropoffPort', 'deliveryChallans.vehicleLine']);
         $from = $request->filled('from_date') ? $request->from_date : now()->startOfMonth()->toDateString();
         $to   = $request->filled('to_date') ? $request->to_date : now()->toDateString();
         $query->whereBetween('date', [$from, $to]);
@@ -76,7 +76,7 @@ class DailyJobController extends Controller
     public function create(Request $request)
     {
         $type = $request->query('type', 'direct');
-        $type = in_array($type, ['direct', 'party_to_party'], true) ? $type : 'direct';
+        $type = in_array($type, ['direct', 'party_to_party', 'madqam'], true) ? $type : 'direct';
 
         return view('daily_jobs.create', array_merge(['type' => $type], $this->formData()));
     }
@@ -171,10 +171,14 @@ class DailyJobController extends Controller
     private function persist(Request $request, ?DailyJob $job = null)
     {
         $jobType = $job->job_type ?? $request->input('job_type', 'direct');
-        $jobType = in_array($jobType, ['direct', 'party_to_party'], true) ? $jobType : 'direct';
+        $jobType = in_array($jobType, ['direct', 'party_to_party', 'madqam'], true) ? $jobType : 'direct';
 
         if ($jobType === 'party_to_party') {
             return $this->persistPartyToParty($request, $job);
+        }
+
+        if ($jobType === 'madqam') {
+            return $this->persistMadqam($request, $job);
         }
 
         return $this->persistDirect($request, $job);
@@ -434,6 +438,82 @@ class DailyJobController extends Controller
             ->update(['daily_job_id' => null]);
     }
 
+        private function madqamRules(): array
+    {
+        return [
+            'date'        => 'required|date',
+            'customer_id' => 'required|exists:chart_of_accounts,id',
+            'remarks'     => 'nullable|string|max:1000',
+            // The vehicle grid: one row per hired-out vehicle.
+            'vehicles'                => 'required|array|min:1',
+            'vehicles.*.vehicle_id'   => 'required|exists:vehicles,id',
+            'vehicles.*.rate_per_day' => 'required|numeric|min:0',
+            'vehicles.*.days'         => 'required|numeric|min:0.01|max:9999',
+        ];
+    }
+
+    // Madqam — the simplest job: date, customer, remarks, and a grid of OUR
+    // vehicles each with a rate per day and a number of days. Each line's
+    // amount is rate × days; the job's total (job_total — what the Bill picks
+    // up) is the sum of the lines. There's no route/trip plan/charges/DC, and
+    // no assistant/admin "incomplete" step, so it is 'complete' from the start
+    // (like Party-to-Party). Amounts are always recomputed here from rate and
+    // days — never trusted from the browser.
+    private function persistMadqam(Request $request, ?DailyJob $job = null)
+    {
+        // A grid row left completely blank (an extra "Add Vehicle" click) is
+        // dropped instead of failing validation.
+        $request->merge(['vehicles' => array_values(array_filter(
+            (array) $request->input('vehicles', []),
+            fn ($row) => is_array($row) && trim(($row['vehicle_id'] ?? '') . ($row['rate_per_day'] ?? '') . ($row['days'] ?? '')) !== ''
+        ))]);
+
+        $data = $request->validate($this->madqamRules());
+
+        $lines = array_map(function ($row) {
+            $rate = round((float) $row['rate_per_day'], 2);
+            $days = round((float) $row['days'], 2);
+
+            return [
+                'vehicle_id'   => (int) $row['vehicle_id'],
+                'rate_per_day' => $rate,
+                'days'         => $days,
+                'amount'       => round($rate * $days, 2),
+            ];
+        }, $data['vehicles']);
+
+        $total = round(array_sum(array_column($lines, 'amount')), 2);
+
+        $payload = [
+            'date'            => $data['date'],
+            'customer_id'     => $data['customer_id'],
+            'remarks'         => $data['remarks'] ?? null,
+            'trip_plan_total' => 0,
+            'job_total'       => $total,
+            'updated_by'      => auth()->id(),
+        ];
+
+        return DB::transaction(function () use ($job, $payload, $lines) {
+            if ($job) {
+                $job->update($payload);
+            } else {
+                $payload['job_no']     = $this->nextJobNo();
+                $payload['job_type']   = 'madqam';
+                $payload['status']     = 'complete';
+                $payload['created_by'] = auth()->id();
+
+                $job = DailyJob::create($payload);
+            }
+
+            // Nothing else points at these rows, so replace the whole set
+            // with what the form sent.
+            $job->madqamLines()->delete();
+            $job->madqamLines()->createMany($lines);
+
+            return $job;
+        });
+    }
+
     // Party-to-Party (Vendor to Customer directly) — simple ledger-style row,
     // no vehicle/route/trip-plan masters involved. Unaffected by items 2/3/11.
     // Party-to-Party (Vendor to Customer directly) — simple ledger-style row,
@@ -528,8 +608,8 @@ class DailyJobController extends Controller
     public function edit($id)
     {
         $job = DailyJob::with([
-            'vehicles.deliveryChallan', 'route', 'pickupPort', 'dropoffPort',
-            'destinationLocation', 'sharedExtraPortCharges', 'ptyVehicles',
+            'vehicles.deliveryChallan', 'ptyVehicles', 'madqamLines', 'route', 'pickupPort', 'dropoffPort',
+            'destinationLocation', 'sharedExtraPortCharges',
             // Item 1 — deliveryChallans.vehicleLine lets pendingDeliveryChallan
             // (see _form.blade.php's pendingDc handling) find, without an
             // N+1, the DC that spawned this job if it hasn't been assigned
@@ -569,7 +649,7 @@ class DailyJobController extends Controller
     public function show($id)
     {
         $job = DailyJob::with([
-            'vehicles.vehicle', 'vehicles.deliveryChallan',
+            'vehicles.vehicle', 'vehicles.deliveryChallan', 'madqamLines.vehicle',
             'route', 'pickupPort', 'dropoffPort', 'destinationLocation', 'ptyVehicles', 'sharedExtraPortCharges.port',
             'customer', 'vendor',
         ])->findOrFail($id);
@@ -604,6 +684,7 @@ class DailyJobController extends Controller
         // print()
         $job = DailyJob::with([
             'customer', 'vendor',
+             'madqamLines.vehicle', 
             'route', 'pickupPort', 'dropoffPort', 'destinationLocation', 'sharedExtraPortCharges.port',
             'vehicles.vehicle', 'vehicles.deliveryChallan', 'ptyVehicles', 'creator',
         ])->findOrFail($id);
@@ -652,7 +733,7 @@ class DailyJobController extends Controller
                     <table border="1" cellpadding="4" cellspacing="0" style="font-size:10px;">
                         <tr><td width="40%"><b>Job No.</b></td><td width="60%">' . e($job->job_no) . e($statusLabel) . '</td></tr>
                         <tr><td width="40%"><b>Date</b></td><td width="60%">' . $job->date->format('d-m-Y') . '</td></tr>
-                        <tr><td width="40%"><b>Type</b></td><td width="60%">' . ($job->job_type === 'party_to_party' ? 'Party-to-Party' : 'Direct') . '</td></tr>
+                        <tr><td width="40%"><b>Type</b></td><td width="60%">' . ($job->job_type === 'party_to_party' ? 'Party-to-Party' : ($job->job_type === 'madqam' ? 'Madqam' : 'Direct')) . '</td></tr>
                         <tr><td width="40%"><b>Created By</b></td><td width="60%">' . e($job->creator->name ?? '—') . '</td></tr>
                     </table>
                 </td>
@@ -660,8 +741,35 @@ class DailyJobController extends Controller
         </table>';
         $pdf->writeHTML($infoHtml, true, false, false, false, '');
         $pdf->Ln(3);
+        if ($job->job_type === 'madqam') {
+            // Vehicle grid: vehicle, rate per day, days, line total — then the job total.
+            $pdf->SetFont('helvetica', 'B', 10);
+            $pdf->Cell(0, 6, 'Vehicles (' . $job->madqamLines->count() . ')', 0, 1, 'L');
+            $pdf->SetFont('helvetica', '', 10);
 
-        if ($job->job_type === 'party_to_party') {
+            $rowsHtml = '';
+            foreach ($job->madqamLines as $mi => $ml) {
+                $rowsHtml .= '<tr>
+                    <td align="center">' . ($mi + 1) . '</td>
+                    <td align="left">' . e($ml->vehicle->name ?? '') . ' (' . e($ml->vehicle->vehicle_no ?? '') . ')</td>
+                    <td align="right">' . number_format($ml->rate_per_day, 2) . '</td>
+                    <td align="right">' . e($ml->days_label) . '</td>
+                    <td align="right">' . number_format($ml->amount, 2) . '</td>
+                </tr>';
+            }
+            $mqHtml = '
+            <table border="0.3" cellpadding="4" cellspacing="0" width="100%" style="font-size:10px;">
+                <tr style="background-color:#f5f5f5;font-weight:bold;">
+                    <th width="8%" align="center">#</th><th width="37%">Vehicle</th><th width="20%" align="right">Rate / Day</th><th width="15%" align="right">No. of Days</th><th width="20%" align="right">Total</th>
+                </tr>' . $rowsHtml . '
+                <tr style="background-color:#f5f5f5;">
+                    <td colspan="4" align="right"><b>Total Amount</b></td>
+                    <td align="right"><b>' . number_format($job->job_total, 2) . '</b></td>
+                </tr>
+            </table>';
+            $pdf->writeHTML($mqHtml, true, false, true, false, '');
+        }
+        elseif  ($job->job_type === 'party_to_party') {
             $html = '
             <table border="0.3" cellpadding="4" cellspacing="0" width="100%" style="font-size:10px;">
                 <tr><td width="30%"><b>Vendor</b></td><td width="70%">' . e($job->vendor->name ?? '') . '</td></tr>

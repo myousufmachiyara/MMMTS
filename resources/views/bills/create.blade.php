@@ -154,7 +154,7 @@ document.getElementById('getJobsBtn').addEventListener('click', function() {
             var tr = document.createElement('tr');
             tr.dataset.trip = j.trip_plan_total;
             tr.innerHTML =
-                '<td><input type="checkbox" class="job-check" name="job_ids[]" value="' + j.id + '" data-vehicles="' + (j.vehicle_count || 1) + '"></td>' +
+                '<td><input type="checkbox" class="job-check" name="job_ids[]" value="' + j.id + '" data-vehicles="' + (j.container_count !== undefined ? j.container_count : (j.vehicle_count || 1)) + '"></td>' +
                 '<td>' + j.job_no + '</td>' +
                 '<td>' + j.date + '</td>' +
                 '<td>' + j.vehicle + '</td>' +
@@ -194,7 +194,7 @@ function recalcTotals() {
         detentionSum += parseFloat(tr.querySelector('[data-detention]').dataset.detention);
         otherSum += parseFloat(tr.querySelector('[data-other]').dataset.other);
         // One vehicle = one container, so a 2-vehicle job counts as 2.
-        count += parseInt(cb.dataset.vehicles, 10) || 1;
+        count += isNaN(parseInt(cb.dataset.vehicles, 10)) ? 1 : parseInt(cb.dataset.vehicles, 10);
     });
     var total = tripSum + otherSum;
 

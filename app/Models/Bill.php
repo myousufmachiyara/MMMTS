@@ -73,6 +73,6 @@ class Bill extends Model
     public function getContainerCountAttribute(): int
     {
         $jobs = $this->relationLoaded('jobs') ? $this->jobs : $this->jobs()->with(['vehicles', 'ptyVehicles'])->get();
-        return (int) $jobs->sum(fn ($job) => $job->billableVehicleCount());
+        return (int) $jobs->sum(fn ($job) => $job->job_type === 'madqam' ? 0 : $job->billableVehicleCount());
     }
 }

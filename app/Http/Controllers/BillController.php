@@ -53,8 +53,7 @@ class BillController extends Controller
             'from_date'   => 'required|date',
             'to_date'     => 'required|date|after_or_equal:from_date',
         ]);
-
-        $jobs = DailyJob::with(['vehicles.vehicle', 'ptyVehicles', 'route', 'vendor'])
+        $jobs = DailyJob::with(['vehicles.vehicle', 'ptyVehicles', 'madqamLines.vehicle', 'route', 'vendor'])
             ->where('customer_id', $request->customer_id)
             ->whereNull('bill_id')
             // An 'incomplete' Direct job (item 11 — assistant hasn't had its
@@ -67,16 +66,14 @@ class BillController extends Controller
             ->get()
             ->map(function ($job) {
                 $isPty = $job->job_type === 'party_to_party';
+                $isMq  = $job->job_type === 'madqam';
                 return [
                     'id'                       => $job->id,
                     'job_no'                   => $job->job_no,
                     'job_type'                 => $job->job_type,
                     'date'                     => $job->date->format('Y-m-d'),
-                    'vehicle'                  => $isPty ? ($job->pty_vehicle_list ?: '—') : ($job->vehicles->pluck('vehicle.name')->filter()->implode(', ') ?: '—'),
-                    // Route is shared across every vehicle on the job — read
-                    // from the job header, falling back to a per-vehicle
-                    // pluck only for older jobs saved before that change.
-                    'route'                    => $isPty ? ($job->pty_destination ?? '—') : ($job->route->name ?? ($job->vehicles->pluck('route.name')->filter()->implode(', ') ?: '—')),
+                    'vehicle'                  => $isPty ? ($job->pty_vehicle_list ?: '—') : ($isMq ? ($job->madqam_vehicle_list ?: '—') : ($job->vehicles->pluck('vehicle.name')->filter()->implode(', ') ?: '—')),
+                    'route'                    => $isPty ? ($job->pty_destination ?? '—') : ($isMq ? 'Madqam' : ($job->route->name ?? ($job->vehicles->pluck('route.name')->filter()->implode(', ') ?: '—'))),
                     'vendor'                   => $isPty ? ($job->vendor->name ?? '—') : null,
                     'trip_plan_total'          => (float) $job->trip_plan_total,
                     'detention_charges_total'  => (float) $job->detention_charges_total,
@@ -91,7 +88,7 @@ class BillController extends Controller
                     'job_total'                => (float) $job->bill_amount,
                     // Vehicle count included so the picker can show "×3"
                     // next to jobs where the multiplier actually applies.
-                    'vehicle_count'            => $job->billableVehicleCount(),
+                    'container_count'          => $isMq ? 0 : $job->billableVehicleCount(),
                 ];
             });
 
@@ -323,7 +320,7 @@ class BillController extends Controller
     {
         $bill = Bill::with([
             'customer', 'company', 'creator','jobs.vehicles.vehicle', 'jobs.vehicles.deliveryChallan', 'jobs.ptyVehicles', 'jobs.route', 
-            'jobs.vendor','jobs.sharedExtraPortCharges.port',
+            'jobs.vendor','jobs.sharedExtraPortCharges.port','jobs.madqamLines.vehicle',
         ])->findOrFail($id);
 
         $pdf = new \TCPDF();
@@ -415,6 +412,7 @@ class BillController extends Controller
 
         foreach ($bill->jobs as $i => $job) {
             $isPty = $job->job_type === 'party_to_party';
+            $isMq  = $job->job_type === 'madqam';
             $detentionPerVehicle = $isPty ? 0 : (float) $job->detention_total;
             $detDateNote = (!$isPty && $job->detention_date)
             ? '<br><span style="font-size:7px;color:#555555;">on ' . $job->detention_date->format('d-m-Y') . '</span>'
@@ -434,8 +432,8 @@ class BillController extends Controller
                 <td>' . ($i + 1) . '</td>
                 <td>' . e($job->job_no) . '</td>
                 <td>' . $job->date->format('d-m-Y') . '</td>
-                <td>' . e($isPty ? ($job->vendor->name ?? '—') : ($job->vehicles->pluck('vehicle.name')->filter()->implode(', ') ?: '—')) . '</td>
-                <td>' . e($isPty ? ($job->pty_destination ?? '—') : ($job->route->name ?? ($job->vehicles->pluck('route.name')->filter()->implode(', ') ?: '—'))) . '</td>
+                <td>' . e($isPty ? ($job->vendor->name ?? '—') : ($isMq ? ($job->madqam_vehicle_list ?: '—') : ($job->vehicles->pluck('vehicle.name')->filter()->implode(', ') ?: '—'))) . '</td>
+                <td>' . e($isPty ? ($job->pty_destination ?? '—') : ($isMq ? 'Madqam' : ($job->route->name ?? ($job->vehicles->pluck('route.name')->filter()->implode(', ') ?: '—')))) . '</td>
                 <td align="right">' . number_format($detentionPerVehicle, 2) . $detDateNote . $perNote . '</td>
                 <td align="right">' . number_format($job->other_charges_per_vehicle, 2) . $perNote . '</td>
                 <td align="right">' . number_format($job->bill_amount, 2) . $totalNote . '</td>
@@ -532,6 +530,21 @@ class BillController extends Controller
         $detLabelNote = $detDates
             ? '<br><span style="font-size:8px;color:#555555;">Detention date: ' . implode('; ', $detDates) . '</span>'
             : '';
+        $madqamTotal = 0;
+        $madqamNotes = [];
+        foreach ($bill->jobs as $job) {
+            if ($job->job_type !== 'madqam') {
+                continue;
+            }
+            $madqamTotal += (float) $job->job_total;
+            foreach ($job->madqamLines as $ml) {
+                $madqamNotes[] = ($multipleJobs ? e($job->job_no) . ': ' : '')
+                    . e($ml->vehicle->name ?? '') . ' ' . number_format($ml->rate_per_day, 2) . ' × ' . $ml->days_label . ' day(s) = ' . number_format($ml->amount, 2);
+            }
+        }
+        $madqamRowHtml = $madqamTotal > 0
+            ? '<tr><td width="80%" align="left">Madqam (Vehicle Hire)<br><span style="font-size:8px;color:#555555;">' . implode('; ', $madqamNotes) . '</span></td><td width="20%">' . number_format($madqamTotal, 2) . '</td></tr>'
+            : '';
         $breakdownHtml = '
         <table border="0.3" cellpadding="4" cellspacing="0" width="100%" style="text-align:right;font-size:10px;">'
             . $breakdownRow('Rent',                  fn ($job) => $isPtyJob($job) ? 0 : $job->rent)
@@ -541,6 +554,7 @@ class BillController extends Controller
             . $breakdownRow('Extra Port Charges',    fn ($job) => $isPtyJob($job) ? 0 : $job->extra_port_charges_total)
             . $portRowsHtml                                                                                    // ← NEW
             . $breakdownRow('Detention Charges' . $detLabelNote, fn ($job) => $isPtyJob($job) ? 0 : $job->detention_total)   // ← label changed
+            . $madqamRowHtml
         . '</table>';
         $pdf->writeHTML($breakdownHtml, true, false, true, false, '');
         $pdf->Ln(4);
@@ -551,7 +565,22 @@ class BillController extends Controller
         $vehicleRowsHtml = '';
         $vi = 0;
         foreach ($bill->jobs as $job) {
-            if ($job->job_type === 'party_to_party') {
+            if ($job->job_type === 'madqam') {
+                // One row per hired-out vehicle; the rate × days working sits
+                // under the vehicle name (no container / DC on a Madqam job).
+                foreach ($job->madqamLines as $ml) {
+                    $vi++;
+                    $vehicleRowsHtml .= '<tr>
+                    <td>' . $vi . '</td>
+                    <td>' . e($job->job_no) . '</td>
+                    <td>' . e($ml->vehicle->name ?? '') . ' (' . e($ml->vehicle->vehicle_no ?? '') . ')<br><span style="font-size:7px;color:#555555;">' . number_format($ml->rate_per_day, 2) . ' × ' . e($ml->days_label) . ' day(s)</span></td>
+                    <td>—</td>
+                    <td>—</td>
+                </tr>';
+                }
+                continue;
+            }
+            else if ($job->job_type === 'party_to_party') {
                 // One row per vendor vehicle (free-text no.; route/size shown
                 // as a small note under it when entered). Jobs saved before
                 // multi-vehicle fall back to their single legacy vehicle.

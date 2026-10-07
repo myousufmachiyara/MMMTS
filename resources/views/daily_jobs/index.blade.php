@@ -24,6 +24,9 @@
         <h2 class="card-title">Daily Jobs</h2>
         @can('daily_jobs.create')
           <div>
+            <a href="{{ route('daily-jobs.create', ['type' => 'madqam']) }}" class="btn btn-outline-secondary">
+              <i class="fas fa-plus"></i> Add Madqam Job
+            </a>
             <a href="{{ route('daily-jobs.create', ['type' => 'direct']) }}" class="btn btn-primary">
               <i class="fas fa-plus"></i> Add Direct Job
             </a>
@@ -99,9 +102,10 @@
                   <td>{{ $index + 1 }}</td>
                   <td><code>{{ $row->job_no }}</code></td>
                   <td>
-                    <span class="badge {{ $row->job_type === 'party_to_party' ? 'bg-info' : 'bg-primary' }}">
-                        {{ $row->job_type === 'party_to_party' ? 'Party-to-Party' : 'Direct' }}
+                    <span class="badge {{ $row->job_type === 'party_to_party' ? 'bg-info' : ($row->job_type === 'madqam' ? 'bg-secondary' : 'bg-primary') }}">
+                        {{ $row->job_type === 'party_to_party' ? 'Party-to-Party' : ($row->job_type === 'madqam' ? 'Madqam' : 'Direct') }}
                     </span>
+                    
                   </td>
                   <td>{{ $row->date->format('d-m-Y') }}</td>
                   <td>
@@ -109,6 +113,11 @@
                       {{ $row->pty_vehicle_list ?: '—' }}
                       @if($row->ptyVehicles->count() > 1)
                         <span class="badge bg-light text-dark border">{{ $row->ptyVehicles->count() }} vehicles</span>
+                      @endif
+                    @elseif($row->job_type === 'madqam')
+                      {{ $row->madqam_vehicle_list ?: '—' }}
+                      @if($row->madqamLines->count() > 1)
+                        <span class="badge bg-light text-dark border">{{ $row->madqamLines->count() }} vehicles</span>
                       @endif
                     @else
                       {{ $row->vehicles->pluck('vehicle.name')->filter()->implode(', ') ?: '—' }}
@@ -118,12 +127,12 @@
                     @endif
                   </td>
                   <td>{{ $row->customer->name ?? '—' }}</td>
-                  <td>{{ $row->job_type === 'party_to_party' ? ($row->pty_destination ?? '—') : ($row->route->name ?? ($row->vehicles->pluck('route.name')->filter()->implode(', ') ?: '—')) }}</td>
+                  <td>{{ $row->job_type === 'madqam' ? '—' : ($row->job_type === 'party_to_party' ? ($row->pty_destination ?? '—') : ($row->route->name ?? ($row->vehicles->pluck('route.name')->filter()->implode(', ') ?: '—'))) }}</td>
                   <td class="text-end">{{ number_format($row->job_total, 2) }}</td>
                   <td>
-                    @if($row->job_type === 'party_to_party')
-                      <span class="text-muted">—</span>
-                    @else
+                    @if($row->job_type !== 'direct')
+                        <span class="text-muted">—</span>
+                      @else
                       <span class="badge {{ $row->status === 'complete' ? 'bg-success' : 'bg-warning text-dark' }}">
                           {{ ucfirst($row->status) }}
                       </span>

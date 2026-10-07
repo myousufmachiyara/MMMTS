@@ -96,6 +96,18 @@ class DailyJob extends Model
         return $this->belongsTo(Vehicle::class);
     }
 
+    public function madqamLines()
+    {
+        return $this->hasMany(DailyJobMadqamLine::class)->orderBy('id');
+    }
+
+    // "TLR-1, TLR-2" — the vehicles on a Madqam job, for lists and the bill
+    // picker. Expects madqamLines.vehicle to be loaded to avoid N+1.
+    public function getMadqamVehicleListAttribute(): string
+    {
+        return $this->madqamLines->map(fn ($l) => $l->vehicle->name ?? null)->filter()->implode(', ');
+    }
+
     // Item 4 — who created this job, shown on the Job Slip print.
     public function creator()
     {
@@ -292,6 +304,10 @@ class DailyJob extends Model
             return max($count, 1);
         }
 
+        if ($this->job_type === 'madqam') {
+            return 1;
+        }
+
         $count = $this->relationLoaded('vehicles')
             ? $this->vehicles->filter(fn ($v) => $v->vehicle_id)->count()
             : $this->vehicles()->whereNotNull('vehicle_id')->count();
@@ -325,6 +341,10 @@ class DailyJob extends Model
             return round((float) $this->pty_sale_amount, 2);
         }
 
+        if ($this->job_type === 'madqam') {
+            return round((float) $this->job_total, 2);
+        }
+        
         return round(
             (float) $this->rent + (float) $this->labour_charges + (float) $this->yard_charges
             + (float) $this->kanta_charges + (float) $this->detention_total + (float) $this->extra_port_charges_total,

@@ -24,9 +24,10 @@
 
 @if($job->job_type === 'party_to_party')
     @include('daily_jobs._form_pty')
+@elseif($job->job_type === 'madqam')
+    @include('daily_jobs._form_madqam')
 @else
     @include('daily_jobs._form')
 @endif
-
 @include('layouts.partials.modal-scripts')
 @endsection
