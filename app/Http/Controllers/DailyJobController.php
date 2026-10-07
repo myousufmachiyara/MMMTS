@@ -748,7 +748,8 @@ class DailyJobController extends Controller
                     <td width="20%"><b>Trip Type</b></td><td width="30%">' . ($job->trip_type === 'two_way' ? 'Two Way' : 'One Way') . '</td></tr>
                 <tr><td><b>Pickup Port</b></td><td>' . e($job->pickupPort->name ?? '—') . '</td>
                     <td><b>Destination</b></td><td>' . e($job->destinationLocation->location_name ?? '—') . '</td></tr>
-                ' . ($job->trip_type === 'two_way' ? '<tr><td><b>Dropoff Port</b></td><td colspan="3">' . e($job->dropoffPort->name ?? '—') . '</td></tr>' : '') . '
+                    ' . ($job->trip_type === 'two_way' ? '<tr><td><b>Dropoff Port</b></td><td colspan="3">' . e($job->dropoffPort->name ?? '—') . '</td></tr>' : '') . '
+                    ' . ($job->detention_date ? '<tr><td><b>Detention Date</b></td><td colspan="3">' . $job->detention_date->format('d-m-Y') . '</td></tr>' : '') . ' 
                 <tr><td colspan="4"><b>Item Description:</b> ' . e($job->item_description ?? '') . '</td></tr>
             </table>';
             $pdf->writeHTML($tripHtml, true, false, true, false, '');

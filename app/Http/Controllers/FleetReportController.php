@@ -36,6 +36,8 @@ class FleetReportController extends Controller
             // Item 15
             'company_share'   => $this->companyShare($from, $to),
             'vehicle_pl'      => $this->vehiclePL($from, $to),
+            'vehicle_ledger'  => $this->vehicleLedger($from, $to, $request->vehicle_id),   // ← NEW
+
         ];
 
         return view('reports.fleet_reports', compact('reports', 'from', 'to', 'vehicles', 'customers', 'vendors', 'routes'));
@@ -60,6 +62,7 @@ class FleetReportController extends Controller
             // Item 15
             'company_share'   => ['Company', 'Revenue', '% of Total'],
             'vehicle_pl'      => ['Vehicle', 'Vehicle No.', 'Trips', 'Revenue', 'Cost', 'Profit'],
+            'vehicle_ledger'  => ['Vehicle', 'Date', 'Job No.', 'Customer', 'Route', 'Container #', 'DC #', 'Bill #', 'Amount', 'Running Total'],   // ← NEW
         ];
     }
 
@@ -73,6 +76,7 @@ class FleetReportController extends Controller
             'customer_routes' => 'Customer x Route Usage',
             'company_share'   => 'Company Wise % Share',
             'vehicle_pl'      => 'Vehicle P&L (Revenue Only)',
+            'vehicle_ledger'  => 'Vehicle Ledger',   // ← NEW
         ];
     }
 
@@ -86,6 +90,7 @@ class FleetReportController extends Controller
             'customer_routes' => $this->customerRoutes($from, $to),
             'company_share'   => $this->companyShare($from, $to),
             'vehicle_pl'      => $this->vehiclePL($from, $to),
+            'vehicle_ledger'  => $this->vehicleLedger($from, $to, $vehicleId),   // ← NEW
             default           => null,
         };
     }
@@ -127,6 +132,16 @@ class FleetReportController extends Controller
                 $r['vehicle'], $r['vehicle_no'], $r['trip_count'], number_format($r['revenue'], 2),
                 $r['cost'] ?? 'N/A', $r['profit'] ?? 'N/A',
             ])->all(),
+            'vehicle_ledger' => collect($data)->flatMap(function ($block) {
+                $rows = collect($block['lines'])->map(fn ($l) => [
+                    $block['vehicle'] . ' (' . $block['vehicle_no'] . ')', $l['date'], $l['job_no'], $l['customer'], $l['route'],
+                    $l['container_no'], $l['dc_no'], $l['bill_no'], number_format($l['amount'], 2), number_format($l['running'], 2),
+                ]);
+                return $rows->push([
+                    $block['vehicle'] . ' (' . $block['vehicle_no'] . ')', 'TOTAL', '', '', '', '', '',
+                    $block['trip_count'] . ' trip(s)', number_format($block['total'], 2), number_format($block['total'], 2),
+                ]);
+            })->all(),
             default => [],
         };
     }
@@ -143,7 +158,7 @@ class FleetReportController extends Controller
         $from = $request->from_date ?? Carbon::now()->startOfMonth()->toDateString();
         $to   = $request->to_date   ?? Carbon::now()->endOfMonth()->toDateString();
 
-        $data = $this->buildReport($key, $from, $to);
+        $data = $this->buildReport($key, $from, $to, $request->get('vehicle_id'));
         $rows = $this->flattenRows($key, $data);
 
         return [
@@ -171,7 +186,10 @@ class FleetReportController extends Controller
     {
         $export = $this->prepareExport($request);
 
-        $pdfContent = $this->renderReportPdf($export['label'], $export['from'], $export['to'], $export['headers'], $export['rows']);
+        // Vehicle Ledger has a long Bill # column — give it proper widths instead of equal ones.
+        $widths = $request->get('report') === 'vehicle_ledger' ? [12, 9, 8, 13, 13, 8, 6, 13, 9, 9] : null;
+
+        $pdfContent = $this->renderReportPdf($export['label'], $export['from'], $export['to'], $export['headers'], $export['rows'], $widths);
 
         $filename = Str::slug($export['label']) . '_' . now()->format('Ymd_His') . '.pdf';
 
@@ -184,7 +202,7 @@ class FleetReportController extends Controller
     // Same shared-style PDF table renderer as AccountsReportController's —
     // duplicated rather than extracted into a shared base/trait, matching
     // how this app already duplicates its PDF boilerplate per controller.
-    private function renderReportPdf(string $label, string $from, string $to, array $headers, array $rows): string
+    private function renderReportPdf(string $label, string $from, string $to, array $headers, array $rows, ?array $widths = null): string
     {
         $pdf = new \TCPDF('L', 'mm', 'A4');
         $pdf->setPrintHeader(false);
@@ -206,8 +224,9 @@ class FleetReportController extends Controller
 
         $html = '<table border="0.3" cellpadding="4" cellspacing="0" width="100%" style="font-size:9px;">
             <tr style="background-color:#f5f5f5;font-weight:bold;">';
-        foreach ($headers as $h) {
-            $html .= '<th width="' . $colWidth . '%">' . e($h) . '</th>';
+        foreach ($headers as $hi => $h) {
+            $w = $widths[$hi] ?? $colWidth; // optional per-report column widths (%), else equal
+            $html .= '<th width="' . $w . '%">' . e($h) . '</th>';
         }
         $html .= '</tr>';
 
@@ -229,7 +248,72 @@ class FleetReportController extends Controller
 
         return $pdf->Output($label . '.pdf', 'S');
     }
+    // ── Vehicle Ledger ──
+    //
+    // One block per vehicle (or just the one picked in the filter): every trip
+    // it ran in the period, oldest first, with a running total. A trip's amount
+    // is the job total UNDIVIDED — the same per-vehicle convention as
+    // vehicleWise() (each vehicle on a job is billed as if it made the whole
+    // trip). Only Direct jobs have one of OUR vehicles; a Party-to-Party job
+    // runs on the vendor's vehicle, so it isn't part of any vehicle ledger.
+    // No expense side: nothing in the system (vouchers included) is tied to a
+    // vehicle, so there is no cost data to put against it.
+    private function vehicleLedger($from, $to, $vehicleId = null)
+    {
+        $lines = collect();
 
+        $this->jobsInRange($from, $to)
+            ->with(['vehicles.deliveryChallan', 'bill'])
+            ->where('job_type', 'direct')
+            ->orderBy('date')->orderBy('id')
+            ->get()
+            ->each(function ($job) use (&$lines, $vehicleId) {
+                foreach ($job->vehicles as $line) {
+                    if (!$line->vehicle_id) {
+                        continue;
+                    }
+                    if ($vehicleId && (int) $line->vehicle_id !== (int) $vehicleId) {
+                        continue;
+                    }
+                    $lines->push([
+                        'vehicle_id'   => $line->vehicle_id,
+                        'vehicle'      => $line->vehicle->name ?? '—',
+                        'vehicle_no'   => $line->vehicle->vehicle_no ?? '—',
+                        'date'         => $job->date->format('d-m-Y'),
+                        'job_no'       => $job->job_no,
+                        'customer'     => $job->customer->name ?? '—',
+                        'route'        => $job->route->name ?? '—',
+                        'container_no' => $line->container_no ?: '—',
+                        'dc_no'        => $line->deliveryChallan->dc_no ?? '—',
+                        'bill_no'      => $job->bill->bill_no ?? 'Unbilled',
+                        'amount'       => round((float) $job->job_total, 2),
+                    ]);
+                }
+            });
+
+        return $lines
+            ->groupBy('vehicle_id')
+            ->map(function ($group) {
+                $first   = $group->first();
+                $running = 0;
+                $rows    = $group->map(function ($l) use (&$running) {
+                    $running   = round($running + $l['amount'], 2);
+                    $l['running'] = $running;
+                    return $l;
+                })->values()->all();
+
+                return [
+                    'vehicle'    => $first['vehicle'],
+                    'vehicle_no' => $first['vehicle_no'],
+                    'trip_count' => count($rows),
+                    'total'      => $running,
+                    'lines'      => $rows,
+                ];
+            })
+            ->sortBy('vehicle')
+            ->values();
+    }
+    
     private function jobsInRange($from, $to)
     {
         // FIX — daily_jobs.vehicle_id is a legacy, pre-multi-vehicle column

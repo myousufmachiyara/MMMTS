@@ -165,9 +165,6 @@ class VoucherController extends Controller
         }
     }
 
-    /**
-     * Print a voucher as PDF.
-     */
     public function print($type, $id)
     {
         $voucher = Voucher::with(['debitAccount', 'creditAccount'])->findOrFail($id);
@@ -175,51 +172,52 @@ class VoucherController extends Controller
         $pdf = new \TCPDF();
         $pdf->setPrintHeader(false);
         $pdf->setPrintFooter(false);
-        $pdf->SetCreator('Your App');
+        $pdf->SetCreator('MMMTS');
         $pdf->SetAuthor('Your Company');
         $pdf->SetTitle(ucfirst($type) . ' Voucher #' . $voucher->id);
         $pdf->SetMargins(10, 10, 10);
         $pdf->AddPage();
         $pdf->setCellPadding(1.5);
 
-        // --- Company Header ---
-        $logoPath = public_path('assets/img/logo.png');
+        // --- Letterhead (same look as the Bill) ---
+        // A voucher isn't tied to one of "Our Companies", so it carries the
+        // default M M LOGISTICS block — the same one a company-less Bill uses.
+        $textX = 10;
 
-        // Logo (Top Left)
-        if (file_exists($logoPath)) {
-            $pdf->Image($logoPath, 12, 8, 40);
-        }
+        $pdf->SetFont('helvetica', 'B', 16);
+        $pdf->SetXY($textX, 10);
+        $pdf->Cell(0, 7, 'M M LOGISTICS', 0, 1, 'L');
+        $pdf->SetFont('helvetica', '', 9);
+        $pdf->SetXY($textX, 17);
+        $pdf->Cell(0, 5, 'Room No 301/307, 3rd Floor, Custom Trade Tower,', 0, 1, 'L');
+        $pdf->SetXY($textX, 22);
+        $pdf->Cell(0, 5, 'KPT Stadium, Kharadar, Karachi', 0, 1, 'L');
 
-        // Purchase INVOICE (Top Right)
+        // Voucher title, top right ("PAYMENT VOUCHER", "JOURNAL VOUCHER", ...)
         $pdf->SetFont('helvetica', 'B', 14);
+        $pdf->SetXY(120, 10);
+        $pdf->Cell(80, 6, strtoupper($type) . ' VOUCHER', 0, 1, 'R');
 
-        // Page width = 210 (A4) - margins (10+10)
-        $pdf->SetXY(120, 12);
-        $pdf->Cell(80, 8, ucfirst($type) . ' Voucher', 0, 1, 'R');
-        
-         // --- Customer + Invoice Info ---
-        $pdf->Ln(5);
+        $pdf->Line(10, 30, 200, 30);
+        $pdf->SetY(34);
+
+        // --- Voucher # / Date ---
         $pdf->SetFont('helvetica', '', 10);
-
         $infoHtml = '
-        <table cellpadding="3" cellspacing="0" width="40%">
+        <table cellpadding="3" cellspacing="0" width="100%">
             <tr>
-                <td>
+                <td width="60%"></td>
+                <td width="40%">
                     <table border="1" cellpadding="4" cellspacing="0" style="font-size:10px;">
-                        <tr>
-                            <td width="30%"><b>Voucher #</b></td>
-                            <td width="40%">'.$voucher->id.'</td>
-                        </tr>
-                        <tr>
-                            <td width="30%"><b>Date</b></td>
-                            <td width="40%">'.\Carbon\Carbon::parse($voucher->date)->format('d-m-Y').'</td>
-                        </tr>
+                        <tr><td width="40%"><b>Voucher #</b></td><td width="60%">' . $voucher->id . '</td></tr>
+                        <tr><td width="40%"><b>Date</b></td><td width="60%">' . \Carbon\Carbon::parse($voucher->date)->format('d-m-Y') . '</td></tr>
                     </table>
                 </td>
             </tr>
         </table>';
 
         $pdf->writeHTML($infoHtml, true, false, false, false, '');
+        $pdf->Ln(2);
 
         // Details Table
         $html = '<table border="0.3" cellpadding="4" style="text-align:center;font-size:10px;">

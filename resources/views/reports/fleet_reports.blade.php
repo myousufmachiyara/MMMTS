@@ -17,6 +17,7 @@
             'customer_routes' => 'Customer × Route Usage',
             'company_share'   => 'Company % Share',
             'vehicle_pl'      => 'Vehicle P&L',
+            'vehicle_ledger'  => 'Vehicle Ledger',
         ] as $key => $label)
             <li class="nav-item">
                 <a class="nav-link {{ $loop->first ? 'active' : '' }}"
@@ -29,7 +30,9 @@
     <div class="tab-content mt-3" id="fleetReportTabsContent">
 
         {{-- Shared date filter --}}
-        <form method="GET" action="{{ route('reports.fleet') }}" class="row g-2 mb-3 no-print">
+        <form method="GET" action="{{ route('reports.fleet') }}" class="row g-2 mb-3 no-print" id="fleetFilterForm">
+            {{-- Keeps the user on the tab they filtered from (filled in by the script below). --}}
+            <input type="hidden" name="tab" id="fleetTabInput" value="{{ request('tab') }}">
             <div class="col-md-3">
                 <label>From Date</label>
                 <input type="date" name="from_date" value="{{ request('from_date', $from) }}" class="form-control" required>
@@ -37,6 +40,17 @@
             <div class="col-md-3">
                 <label>To Date</label>
                 <input type="date" name="to_date" value="{{ request('to_date', $to) }}" class="form-control" required>
+            </div>
+            <div class="col-md-3">
+                <label>Vehicle <small class="text-muted">(Vehicle Ledger tab)</small></label>
+                <select name="vehicle_id" class="form-control">
+                    <option value="">-- All Vehicles --</option>
+                    @foreach($vehicles as $veh)
+                        <option value="{{ $veh->id }}" {{ request('vehicle_id') == $veh->id ? 'selected' : '' }}>
+                            {{ $veh->name }}{{ $veh->vehicle_no ? ' (' . $veh->vehicle_no . ')' : '' }}
+                        </option>
+                    @endforeach
+                </select>
             </div>
             <div class="col-md-2 d-flex align-items-end">
                 <button class="btn btn-primary w-100" type="submit"><i class="fas fa-filter"></i> Filter</button>
@@ -78,6 +92,59 @@
                     </tbody>
                 </table>
             </div>
+        </div>
+
+        {{-- Vehicle Ledger --}}
+        <div class="tab-pane fade" id="vehicle_ledger" role="tabpanel">
+            <p class="text-muted small">Every trip each vehicle ran in the period, oldest first, with a running total. A trip's amount is the job total (each vehicle on a job is billed as the full trip). Party-to-Party jobs aren't listed — they run on the vendor's vehicle. Vehicle expenses aren't shown because no cost or voucher is recorded against a vehicle.</p>
+            <div class="mb-2 no-print">
+                <a class="btn btn-danger btn-sm" href="{{ route('reports.fleet.exportPdf', ['report' => 'vehicle_ledger', 'from_date' => $from, 'to_date' => $to, 'vehicle_id' => request('vehicle_id')]) }}"><i class="fas fa-file-pdf"></i> PDF</a>
+                <a class="btn btn-success btn-sm" href="{{ route('reports.fleet.exportExcel', ['report' => 'vehicle_ledger', 'from_date' => $from, 'to_date' => $to, 'vehicle_id' => request('vehicle_id')]) }}"><i class="fas fa-file-excel"></i> Excel</a>
+            </div>
+            @forelse($reports['vehicle_ledger'] as $block)
+                <h6 class="mt-3">{{ $block['vehicle'] }} <span class="text-muted">({{ $block['vehicle_no'] }})</span></h6>
+                <div class="table-responsive mb-3">
+                    <table class="table table-bordered table-striped table-sm mb-0">
+                        <thead class="table-dark">
+                            <tr>
+                                <th>Date</th>
+                                <th>Job No.</th>
+                                <th>Customer</th>
+                                <th>Route</th>
+                                <th>Container #</th>
+                                <th>DC #</th>
+                                <th>Bill #</th>
+                                <th class="text-end">Amount</th>
+                                <th class="text-end">Running Total</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach($block['lines'] as $l)
+                                <tr>
+                                    <td>{{ $l['date'] }}</td>
+                                    <td>{{ $l['job_no'] }}</td>
+                                    <td>{{ $l['customer'] }}</td>
+                                    <td>{{ $l['route'] }}</td>
+                                    <td>{{ $l['container_no'] }}</td>
+                                    <td>{{ $l['dc_no'] }}</td>
+                                    <td>{!! $l['bill_no'] === 'Unbilled' ? '<span class="text-muted">Unbilled</span>' : e($l['bill_no']) !!}</td>
+                                    <td class="text-end">{{ number_format($l['amount'], 2) }}</td>
+                                    <td class="text-end">{{ number_format($l['running'], 2) }}</td>
+                                </tr>
+                            @endforeach
+                        </tbody>
+                        <tfoot>
+                            <tr class="table-active fw-bold">
+                                <td colspan="7" class="text-end">Total — {{ $block['trip_count'] }} trip(s)</td>
+                                <td class="text-end">{{ number_format($block['total'], 2) }}</td>
+                                <td class="text-end">{{ number_format($block['total'], 2) }}</td>
+                            </tr>
+                        </tfoot>
+                    </table>
+                </div>
+            @empty
+                <p class="text-muted">No trips for {{ request('vehicle_id') ? 'this vehicle' : 'any vehicle' }} in this period.</p>
+            @endforelse
         </div>
 
         {{-- Customer Wise --}}
@@ -295,4 +362,23 @@
 
     </div>
 </div>
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+    var form  = document.getElementById('fleetFilterForm');
+    var input = document.getElementById('fleetTabInput');
+
+    // Re-open the tab the page was filtered from (?tab=…).
+    try {
+        var tab = new URLSearchParams(window.location.search).get('tab');
+        var el  = tab ? document.querySelector('#fleetReportTabs .nav-link[href="#' + tab + '"]') : null;
+        if (el && typeof bootstrap !== 'undefined') { new bootstrap.Tab(el).show(); }
+    } catch (e) {}
+
+    // Remember which tab is open when Filter is pressed.
+    form.addEventListener('submit', function () {
+        var active = document.querySelector('#fleetReportTabs .nav-link.active');
+        if (active) { input.value = active.getAttribute('href').replace('#', ''); }
+    });
+});
+</script>
 @endsection

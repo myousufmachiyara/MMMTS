@@ -179,7 +179,7 @@
                             <td>
                                 @php $ref = $row[2] ?? ''; @endphp
                                 @if (str_starts_with($ref, 'Voucher #'))
-                                    @php $vid = (int) str_replace('Voucher #', '', $ref); @endphp
+                                    @php $vid = preg_match('/Voucher #(\d+)/', $ref, $m) ? (int) $m[1] : 0; @endphp
                                     {{-- FIX 2: link to the voucher's real type (journal/receipt/etc.),
                                          not always 'journal' — a Payment's auto-posted voucher is 'receipt'. --}}
                                     @php $vtype = $row[7] ?? 'journal'; @endphp
@@ -205,7 +205,7 @@
                             <td>
                                 @php $ref = $row[2] ?? ''; @endphp
                                 @if (str_starts_with($ref, 'Voucher #'))
-                                    @php $vid = (int) str_replace('Voucher #', '', explode(' ', $ref)[0]); @endphp
+                                    @php $vid = preg_match('/Voucher #(\d+)/', $ref, $m) ? (int) $m[1] : 0; @endphp
                                     @php $vtype = $row[7] ?? 'journal'; @endphp
                                     <a href="{{ route('vouchers.print', ['type' => $vtype, 'id' => $vid]) }}"
                                        target="_blank" class="ref-link">{{ $ref }}</a>
@@ -234,7 +234,7 @@
                             <td>
                                 @php
                                     $ref = $row[1] ?? '';
-                                    $vid = (int) str_replace('Voucher #', '', $ref);
+                                    $vid = preg_match('/Voucher #(\d+)/', $ref, $m) ? (int) $m[1] : 0;
                                 @endphp
                                 @if ($vid)
                                     <a href="{{ route('vouchers.print', ['type' => 'journal', 'id' => $vid]) }}"
