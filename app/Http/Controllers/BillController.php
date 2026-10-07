@@ -461,7 +461,6 @@ class BillController extends Controller
             </tr>';
         $html .= '</table>';
         $pdf->writeHTML($html, true, false, true, false, '');
-        $pdf->Ln(3);
 
         // Item 9 — the Rent/Labour/Yard/Kanta/Extra Port/Detention breakdown
         // that used to live on the Job Slip print now lives here instead,
