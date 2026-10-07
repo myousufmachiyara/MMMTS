@@ -322,8 +322,8 @@ class BillController extends Controller
     public function print($id)
     {
         $bill = Bill::with([
-            'customer', 'company', 'creator',
-            'jobs.vehicles.vehicle', 'jobs.vehicles.deliveryChallan', 'jobs.ptyVehicles', 'jobs.route', 'jobs.vendor',
+            'customer', 'company', 'creator','jobs.vehicles.vehicle', 'jobs.vehicles.deliveryChallan', 'jobs.ptyVehicles', 'jobs.route', 
+            'jobs.vendor','jobs.sharedExtraPortCharges.port',
         ])->findOrFail($id);
 
         $pdf = new \TCPDF();
@@ -415,6 +415,10 @@ class BillController extends Controller
 
         foreach ($bill->jobs as $i => $job) {
             $isPty = $job->job_type === 'party_to_party';
+            $detentionPerVehicle = $isPty ? 0 : (float) $job->detention_total;
+            $detDateNote = (!$isPty && $job->detention_date)
+            ? '<br><span style="font-size:7px;color:#555555;">on ' . $job->detention_date->format('d-m-Y') . '</span>'
+            : '';
             // Item 3 (round 3) — a Direct job's charges are entered once and
             // billed once per vehicle, so a multi-vehicle job reads, left to
             // right: charges PER VEHICLE (Detention / Other columns), then the
@@ -432,7 +436,7 @@ class BillController extends Controller
                 <td>' . $job->date->format('d-m-Y') . '</td>
                 <td>' . e($isPty ? ($job->vendor->name ?? '—') : ($job->vehicles->pluck('vehicle.name')->filter()->implode(', ') ?: '—')) . '</td>
                 <td>' . e($isPty ? ($job->pty_destination ?? '—') : ($job->route->name ?? ($job->vehicles->pluck('route.name')->filter()->implode(', ') ?: '—'))) . '</td>
-                <td align="right">' . number_format($detentionPerVehicle, 2) . $perNote . '</td>
+                <td align="right">' . number_format($detentionPerVehicle, 2) . $detDateNote . $perNote . '</td>
                 <td align="right">' . number_format($job->other_charges_per_vehicle, 2) . $perNote . '</td>
                 <td align="right">' . number_format($job->bill_amount, 2) . $totalNote . '</td>
             </tr>';
@@ -500,7 +504,35 @@ class BillController extends Controller
             return '<tr><td width="80%" align="left">' . $label . $noteHtml . '</td><td width="20%">' . number_format($total, 2) . '</td></tr>';
         };
         $isPtyJob = fn ($job) => $job->job_type === 'party_to_party';
+        // Extra Port Charges itemised per port (summed across the bill's jobs,
+        // each job's charge × its vehicle count, so the lines add up to the
+        // "Extra Port Charges" row they sit under).
+        $portTotals = [];
+        foreach ($bill->jobs as $job) {
+            if ($isPtyJob($job)) {
+                continue;
+            }
+            $vc = $job->billableVehicleCount();
+            foreach ($job->sharedExtraPortCharges as $epc) {
+                $name = $epc->port->name ?? 'Port';
+                $portTotals[$name] = ($portTotals[$name] ?? 0) + (float) $epc->charges * $vc;
+            }
+        }
+        $portRowsHtml = '';
+        foreach ($portTotals as $name => $amt) {
+            $portRowsHtml .= '<tr style="color:#444444;font-size:9px;"><td width="80%" align="left">&nbsp;&nbsp;&nbsp;- ' . e($name) . '</td><td width="20%">' . number_format($amt, 2) . '</td></tr>';
+        }
 
+        // Detention dates, tagged with the job no. when the bill has several jobs.
+        $detDates = [];
+        foreach ($bill->jobs as $job) {
+            if (!$isPtyJob($job) && $job->detention_date) {
+                $detDates[] = ($multipleJobs ? e($job->job_no) . ': ' : '') . $job->detention_date->format('d-m-Y');
+            }
+        }
+        $detLabelNote = $detDates
+            ? '<br><span style="font-size:8px;color:#555555;">Detention date: ' . implode('; ', $detDates) . '</span>'
+            : '';
         $breakdownHtml = '
         <table border="0.3" cellpadding="4" cellspacing="0" width="100%" style="text-align:right;font-size:10px;">'
             . $breakdownRow('Rent',                  fn ($job) => $isPtyJob($job) ? 0 : $job->rent)
@@ -508,7 +540,8 @@ class BillController extends Controller
             . $breakdownRow('Yard Charges',          fn ($job) => $isPtyJob($job) ? 0 : $job->yard_charges)
             . $breakdownRow('Weight Bridge (Kanta)', fn ($job) => $isPtyJob($job) ? 0 : $job->kanta_charges)
             . $breakdownRow('Extra Port Charges',    fn ($job) => $isPtyJob($job) ? 0 : $job->extra_port_charges_total)
-            . $breakdownRow('Detention Charges',     fn ($job) => $isPtyJob($job) ? 0 : $job->detention_total)
+            . $portRowsHtml                                                                                    // ← NEW
+            . $breakdownRow('Detention Charges' . $detLabelNote, fn ($job) => $isPtyJob($job) ? 0 : $job->detention_total)   // ← label changed
         . '</table>';
         $pdf->writeHTML($breakdownHtml, true, false, true, false, '');
         $pdf->Ln(4);
