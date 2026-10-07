@@ -621,6 +621,6 @@ class BillController extends Controller
         $pdf->Cell($lineWidth, 6, 'Prepared By', 0, 0, 'C');
         $pdf->SetXY(130, $yPos + 2);
         $pdf->Cell($lineWidth, 6, 'Authorized By', 0, 0, 'C');
-        return $pdf->Output('bill_' . str_replace('/', '-', $bill->bill_no) . '.pdf', 'I');
+        return $pdf->Output(str_replace('/', '-', $bill->bill_no) . '.pdf', 'I');
     }
 }
