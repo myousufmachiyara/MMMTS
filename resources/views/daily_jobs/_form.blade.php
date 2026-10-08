@@ -34,6 +34,8 @@
             'vehicle_id'             => $v->vehicle_id,
             'container_no'           => $v->container_no,
             'delivery_challan_id'    => $v->delivery_challan_id,
+            // Rent is the one charge entered per vehicle.
+            'rent'                   => (float) $v->rent,
             'delivery_challan_label' => $v->deliveryChallan ? ($v->deliveryChallan->dc_no . ' — ' . $v->deliveryChallan->dc_date->format('d-m-Y')) : null,
         ];
     })->values() : [];
@@ -67,7 +69,6 @@
         'pickup_port_id'              => $job->pickup_port_id ?? $firstLine?->pickup_port_id,
         'destination_location_id'     => $job->destination_location_id ?? $firstLine?->destination_location_id,
         'dropoff_port_id'             => $job->dropoff_port_id ?? $firstLine?->dropoff_port_id,
-        'rent'                        => $job->rent ?: ($firstLine->rent ?? 0),
         'labour_charges'              => $job->labour_charges ?: ($firstLine->labour_charges ?? 0),
         'yard_charges'                => $job->yard_charges ?: ($firstLine->yard_charges ?? 0),
         'kanta_charges'               => $job->kanta_charges ?: ($firstLine->kanta_charges ?? 0),
@@ -82,7 +83,7 @@
     ] : [
         'route_id' => null, 'item_description' => null, 'trip_type' => 'one_way',
         'pickup_port_id' => null, 'destination_location_id' => null, 'dropoff_port_id' => null,
-        'rent' => 0, 'labour_charges' => 0, 'yard_charges' => 0, 'kanta_charges' => 0,
+        'labour_charges' => 0, 'yard_charges' => 0, 'kanta_charges' => 0,
         'detention_first_day_charges' => 0, 'detention_next_day_rate' => 0,
         'detention_extra_days' => 0, 'detention_night_rate' => 0, 'detention_date' => null,
         'extra_port' => [],
@@ -191,6 +192,12 @@
                                  basic details, not gated behind fill_rates
                                  any more. --}}
                             <th>Delivery Challan <small class="text-muted">(optional)</small></th>
+                            {{-- Rent can differ from vehicle to vehicle on the same
+                                 job; every other charge above is shared and applied
+                                 once per vehicle. Rates are admin-only. --}}
+                            @if($canFillRates)
+                                <th style="width:14%">Rent</th>
+                            @endif
                             <th style="width:5%"></th>
                         </tr>
                     </thead>
@@ -320,22 +327,31 @@ function recalcTotal() {
     var extraPortTotal = 0;
     document.querySelectorAll('.extra-port-calc').forEach(function(el) { extraPortTotal += (parseFloat(el.value) || 0); });
 
-    var rent = num('rent'), labour = num('labour'), yard = num('yard'), kanta = num('kanta');
+    var labour = num('labour'), yard = num('yard'), kanta = num('kanta');
     // Item 3 (round 3) follow-up — this preview used to stop here, showing
     // only the once-entered rate total even when the job has several
     // vehicles. The REAL bill amount multiplies by how many vehicles are on
     // the job (see DailyJob::getOtherChargesTotalAttribute()), so the
     // preview needs to do the same or it quietly undersells what Save will
     // actually bill once a Bill is created from this job.
-    var perVehicleTotal = rent + labour + yard + kanta + detentionTotal + extraPortTotal;
+    // Rent is entered on each vehicle row (it can differ per vehicle), so it
+    // is SUMMED over the vehicles; the shared charges are applied once per
+    // vehicle.
+    var rentTotal = 0;
+    document.querySelectorAll('#vehicleRows > tr').forEach(function(tr) {
+        var sel = tr.querySelector('select[name$="[vehicle_id]"]');
+        var rentEl = tr.querySelector('.vehicle-rent');
+        if (sel && sel.value && rentEl) rentTotal += (parseFloat(rentEl.value) || 0);
+    });
+    var sharedPerVehicle = labour + yard + kanta + detentionTotal + extraPortTotal;
     var vCount = vehicleCount();
-    var jobTotal = perVehicleTotal * vCount;
+    var jobTotal = rentTotal + sharedPerVehicle * vCount;
     document.getElementById('job_total').value = fmt(jobTotal);
 
     var noteEl = document.getElementById('vehicleMultiplierNote');
     if (noteEl) {
         noteEl.textContent = vCount > 1
-            ? (fmt(perVehicleTotal) + ' per vehicle × ' + vCount + ' vehicles')
+            ? ('Rent ' + fmt(rentTotal) + ' + ' + fmt(sharedPerVehicle) + ' other charges per vehicle × ' + vCount + ' vehicles')
             : '';
     }
 }
@@ -372,10 +388,9 @@ function renderRateFields() {
         '</div>' +
     '</div>' +
     '<div class="row form-group">' +
-        '<div class="col-lg-3 mb-2"><label>Rent</label><input type="number" step="any" class="form-control" id="rent" name="rent" value="' + (row.rent || 0) + '" oninput="recalcTotal()"></div>' +
-        '<div class="col-lg-3 mb-2"><label>Labour Charges</label><input type="number" step="any" class="form-control" id="labour" name="labour_charges" value="' + (row.labour_charges || 0) + '" oninput="recalcTotal()"></div>' +
-        '<div class="col-lg-3 mb-2"><label>Yard</label><input type="number" step="any" class="form-control" id="yard" name="yard_charges" value="' + (row.yard_charges || 0) + '" oninput="recalcTotal()"></div>' +
-        '<div class="col-lg-3 mb-2"><label>Weight Bridge (Kanta)</label><input type="number" step="any" class="form-control" id="kanta" name="kanta_charges" value="' + (row.kanta_charges || 0) + '" oninput="recalcTotal()"></div>' +
+        '<div class="col-lg-4 mb-2"><label>Labour Charges</label><input type="number" step="any" class="form-control" id="labour" name="labour_charges" value="' + (row.labour_charges || 0) + '" oninput="recalcTotal()"></div>' +
+        '<div class="col-lg-4 mb-2"><label>Yard</label><input type="number" step="any" class="form-control" id="yard" name="yard_charges" value="' + (row.yard_charges || 0) + '" oninput="recalcTotal()"></div>' +
+        '<div class="col-lg-4 mb-2"><label>Weight Bridge (Kanta)</label><input type="number" step="any" class="form-control" id="kanta" name="kanta_charges" value="' + (row.kanta_charges || 0) + '" oninput="recalcTotal()"></div>' +
     '</div>' +
     '<div class="row form-group">' +
         '<div class="col-lg-12"><label class="mb-0"><strong>Detention Charges</strong> <small class="text-muted">(night rate applies only once extra days is more than 1)</small></label></div>' +
@@ -533,6 +548,14 @@ function addVehicleRow(row) {
     row = row || {};
     var vi = vIndex++;
 
+    // A new row starts with the previous row's rent (most jobs use the same
+    // rent for every vehicle); change it where a vehicle's rent differs.
+    var rentValue = row.rent;
+    if (rentValue === undefined || rentValue === null) {
+        var prevRent = document.querySelector('#vehicleRows > tr:last-child .vehicle-rent');
+        rentValue = prevRent ? prevRent.value : 0;
+    }
+
     var tr = document.createElement('tr');
     tr.id = 'vehicleRow_' + vi;
     tr.innerHTML =
@@ -543,6 +566,9 @@ function addVehicleRow(row) {
         // Item 2 — no longer gated behind canFillRates; DC linking is a
         // BASIC field now (see the "Delivery Challan" <th> above).
         '<td><select class="form-control select2-js" id="dc_select_' + vi + '" name="vehicles[' + vi + '][delivery_challan_id]"><option value="">— Not linked —</option></select></td>' +
+        (canFillRates
+            ? '<td><input type="number" step="any" min="0" class="form-control vehicle-rent" name="vehicles[' + vi + '][rent]" value="' + rentValue + '" oninput="recalcTotal()"></td>'
+            : '') +
         '<td class="text-center"><button type="button" class="btn btn-link text-danger p-0 remove-vehicle-row"><i class="fas fa-trash-alt"></i></button></td>';
 
     document.getElementById('vehicleRows').appendChild(tr);

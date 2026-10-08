@@ -19,6 +19,8 @@ class DailyJob extends Model
         'route_id',
         'container_no',
         'item_description',
+        // Direct jobs: rent is entered PER VEHICLE (daily_job_vehicles.rent);
+        // this column holds the job's TOTAL rent, for reference only.
         'rent',
         'labour_charges',
         'yard_charges',
@@ -50,6 +52,8 @@ class DailyJob extends Model
         // fields above; shared once across the job like they are, not
         // mirrored onto vehicle-rows (see DailyJobController::persistDirect()).
         'detention_date',
+        // Direct jobs: the FULL job amount (every vehicle's own rent + the
+        // shared charges once per vehicle). Same figure as bill_amount.
         'job_total',
         'bill_id',
         'remarks',
@@ -106,7 +110,7 @@ class DailyJob extends Model
         return $this->hasMany(DailyJobMadqamLine::class)->orderBy('id');
     }
 
-        public function advanceAccount()
+    public function advanceAccount()
     {
         return $this->belongsTo(ChartOfAccounts::class, 'mq_advance_account_id');
     }
@@ -150,7 +154,7 @@ class DailyJob extends Model
     {
         return round($this->mq_total - $this->mq_total_advance, 2);
     }
-    
+
     // "TLR-1, TLR-2" — the vehicles on a Madqam job, for lists and the bill
     // picker. Expects madqamLines.vehicle to be loaded to avoid N+1.
     public function getMadqamVehicleListAttribute(): string
@@ -211,11 +215,13 @@ class DailyJob extends Model
     }
 
     // One row per vehicle on this job (item 3 — a Direct job can involve
-    // multiple vehicles). Since the multi-vehicle-form change, a vehicle
-    // row carries only vehicle_id/container_no/delivery_challan_id — route,
-    // trip plan, and every rate/charge field are shared across all of a
-    // job's vehicles and live on the job header instead (see this model's
-    // route_id/rent/detention_* etc. and sharedExtraPortCharges() above).
+    // multiple vehicles). A vehicle row carries vehicle_id/container_no/
+    // delivery_challan_id and, for Direct jobs, that vehicle's own RENT
+    // (rent can differ from vehicle to vehicle). Route, trip plan and every
+    // other charge (labour, yard, kanta, detention, extra ports) are shared
+    // across all of a job's vehicles and live on the job header instead (see
+    // this model's route_id/labour_charges/detention_* etc. and
+    // sharedExtraPortCharges() above).
     // Every direct job — old or new — has at least one row: pre-rewrite
     // jobs were backfilled with exactly one (see the
     // 2026_09_03_000005 migration).
@@ -322,18 +328,18 @@ class DailyJob extends Model
         return round($this->pty_total_sale - $this->pty_total_cost, 2);
     }
 
-    // Item 3 (round 3) — "job total amount * no of vehicles on the job =
-    // total bill amount of that job". A Direct job's charges (rent, labour,
-    // yard, kanta, detention, extra port) are still entered ONCE on the job
-    // header, same as before — but every one of this job's REAL vehicle-rows
-    // (vehicle_id set — excludes any stray row without one) is now billed as
-    // if it independently made the same full trip, so the amount that
-    // actually gets billed multiplies by how many vehicles are on the job.
+    // Item 3 (round 3) — every one of a Direct job's REAL vehicle-rows
+    // (vehicle_id set — excludes any stray row without one) is billed as if
+    // it independently made the same full trip, so the shared charges
+    // (labour, yard, kanta, detention, extra port) are multiplied by how many
+    // vehicles are on the job. Rent is the exception: it is entered per
+    // vehicle and can differ, so it is summed rather than multiplied (see
+    // direct_rent_total below).
     // A job with zero vehicle-rows (shouldn't normally happen — the form
     // requires at least one) is treated as ×1 rather than ×0, so it's never
     // silently billed as zero. Party-to-Party jobs work the same way but
     // count their free-text ptyVehicles() rows (pty_sale_amount is the
-    // per-vehicle amount, like a Direct job's rates).
+    // per-vehicle amount, like a Direct job's shared charges).
     //
     // Prefers the already-loaded vehicles relation (every report/controller
     // that reads this already eager-loads 'vehicles...') to avoid N+1; falls
@@ -354,6 +360,9 @@ class DailyJob extends Model
             return max($count, 1);
         }
 
+        // Muqadum: the vehicles' rents, guarantee and advance are already worked
+        // out into job_total — nothing here is multiplied by a vehicle count,
+        // so it counts as one billing unit.
         if ($this->job_type === 'madqam') {
             return 1;
         }
@@ -365,19 +374,73 @@ class DailyJob extends Model
         return max($count, 1);
     }
 
+    // ── Direct jobs: Rent is entered per vehicle (daily_job_vehicles.rent) ──
+
+    // The real vehicle rows of a Direct job (those with a vehicle picked).
+    private function directLines()
+    {
+        $lines = $this->relationLoaded('vehicles') ? $this->vehicles : $this->vehicles()->get();
+
+        return $lines->filter(fn ($v) => $v->vehicle_id);
+    }
+
+    // Sum of every vehicle's own rent. A job with no vehicle rows at all
+    // (shouldn't happen) falls back to the job's stored rent so it never
+    // silently bills as zero.
+    public function getDirectRentTotalAttribute(): float
+    {
+        $lines = $this->directLines();
+
+        if ($lines->isEmpty()) {
+            return round((float) $this->rent, 2);
+        }
+
+        return round((float) $lines->sum(fn ($v) => (float) $v->rent), 2);
+    }
+
+    // Labour + yard + kanta + detention + extra-port charges — the shared
+    // charges entered once on the job, which apply to EACH vehicle.
+    public function getDirectSharedPerVehicleAttribute(): float
+    {
+        return round(
+            (float) $this->labour_charges + (float) $this->yard_charges + (float) $this->kanta_charges
+            + (float) $this->detention_total + (float) $this->extra_port_charges_total,
+            2
+        );
+    }
+
+    // True when every vehicle on the job has the same rent.
+    public function getHasUniformRentAttribute(): bool
+    {
+        $rents = $this->directLines()->map(fn ($v) => round((float) $v->rent, 2))->unique();
+
+        return $rents->count() <= 1;
+    }
+
+    // What ONE vehicle costs the customer: its own rent + the shared charges.
+    public function vehicleAmount($line): float
+    {
+        return round((float) ($line->rent ?? 0) + $this->direct_shared_per_vehicle, 2);
+    }
+
     // "Other charges" = everything except the Trip Plan portion. Trip Plan
     // no longer carries any charges of its own (item 2) — tax is applied to
-    // the job's grand total instead (item 13). Rent/labour/yard/kanta/
-    // detention/extra-port-charges are shared once across the whole job
-    // (not per vehicle any more — see this model's vehicles() docblock), so
-    // for Direct jobs this is those job-header fields added up once, THEN
-    // multiplied by billableVehicleCount() (item 3, round 3 — see above).
-    // Party-to-Party jobs have no trip-plan concept, so the amount billed to
-    // the customer per vehicle (pty_sale_amount — NOT pty_cost, which is what
-    // we owe the vendor) is carried entirely as "other charges" here, and is
-    // multiplied by the job's number of vendor vehicles like any other job.
+    // the job's grand total instead (item 13).
+    //   Direct:         every vehicle's own rent (summed) + the shared charges
+    //                   (labour/yard/kanta/detention/extra-port) once per vehicle.
+    //   Party-to-Party: the amount billed to the customer per vehicle
+    //                   (pty_sale_amount — NOT pty_cost, which is what we owe
+    //                   the vendor) × the number of vendor vehicles.
+    //   Muqadum:        job_total, billed once.
     public function getOtherChargesTotalAttribute()
     {
+        if ($this->job_type === 'direct' || $this->job_type === null) {
+            return round(
+                $this->direct_rent_total + $this->direct_shared_per_vehicle * $this->billableVehicleCount(),
+                2
+            );
+        }
+
         return round($this->other_charges_per_vehicle * $this->billableVehicleCount(), 2);
     }
 
@@ -385,19 +448,22 @@ class DailyJob extends Model
     // i.e. before the ×vehicle-count multiplier. This is what the Bill print
     // shows as "charges per vehicle" next to the vehicle count and the total.
     // (For a Party-to-Party job this is its per-vehicle pty_sale_amount.)
+    // For a Direct job whose vehicles have different rents this is the
+    // AVERAGE per vehicle — only a display figure; other_charges_total is
+    // always the exact sum.
     public function getOtherChargesPerVehicleAttribute()
     {
         if ($this->job_type === 'party_to_party') {
             return round((float) $this->pty_sale_amount, 2);
         }
 
+        // Muqadum: the whole job total (total rent + total guarantee), billed once.
         if ($this->job_type === 'madqam') {
             return round((float) $this->job_total, 2);
         }
-        
+
         return round(
-            (float) $this->rent + (float) $this->labour_charges + (float) $this->yard_charges
-            + (float) $this->kanta_charges + (float) $this->detention_total + (float) $this->extra_port_charges_total,
+            $this->direct_rent_total / $this->billableVehicleCount() + $this->direct_shared_per_vehicle,
             2
         );
     }

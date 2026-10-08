@@ -106,9 +106,10 @@ class DailyJobController extends Controller
 
             // ── Trip & Charges — shared across every vehicle on the job.
             // Everything on a multi-vehicle Direct job is the same for
-            // every vehicle EXCEPT the vehicle itself and its container
-            // number, so these are entered once here instead of once per
-            // vehicle-row. route_id/item_description stay BASIC fields
+            // every vehicle EXCEPT the vehicle itself, its container
+            // number and its RENT (see vehicles.*.rent below), so the rest
+            // is entered once here instead of once per vehicle-row.
+            // route_id/item_description stay BASIC fields
             // (assistant-fillable, item 11) exactly as they were when they
             // lived on each vehicle-row; the rest stay ADMIN-only
             // (daily_jobs.fill_rates) exactly as before.
@@ -119,7 +120,6 @@ class DailyJobController extends Controller
             'pickup_port_id'              => 'nullable|exists:ports,id',
             'destination_location_id'     => 'nullable|exists:customer_locations,id',
             'dropoff_port_id'             => 'nullable|exists:ports,id',
-            'rent'                        => 'nullable|numeric|min:0',
             'labour_charges'              => 'nullable|numeric|min:0',
             'yard_charges'                => 'nullable|numeric|min:0',
             'kanta_charges'               => 'nullable|numeric|min:0',
@@ -141,6 +141,9 @@ class DailyJobController extends Controller
             'vehicles.*.vehicle_id'       => 'required|exists:vehicles,id',
             'vehicles.*.container_no'     => 'nullable|string|max:100',
             'vehicles.*.delivery_challan_id' => 'nullable|exists:delivery_challans,id',
+            // Rent is the one charge that can differ from vehicle to vehicle
+            // (admin-only like every other rate — ignored without fill_rates).
+            'vehicles.*.rent'             => 'nullable|numeric|min:0',
         ];
     }
 
@@ -187,11 +190,12 @@ class DailyJobController extends Controller
         return $this->persistDirect($request, $job);
     }
 
-    // Direct jobs — one or more vehicles (item 3), but everything except the
-    // vehicle itself and its container number is the SAME for every vehicle
-    // on the job, so route/trip plan/rates/detention/extra-port-charges are
-    // entered once here and applied to the job as a whole rather than
-    // duplicated per vehicle-row.
+    // Direct jobs — one or more vehicles (item 3). Everything except the
+    // vehicle itself, its container number and its rent is the SAME for every
+    // vehicle on the job, so route/trip plan/labour/yard/kanta/detention/
+    // extra-port-charges are entered once here and applied to the job as a
+    // whole (each vehicle is billed them once); rent is entered per vehicle,
+    // on the vehicle's own row.
     private function persistDirect(Request $request, ?DailyJob $job = null)
     {
         $data = $request->validate($this->rules());
@@ -229,11 +233,9 @@ class DailyJobController extends Controller
                 }
                 $extraTotal = round($extraTotal, 2);
 
-                $rent   = (float) ($data['rent'] ?? 0);
                 $labour = (float) ($data['labour_charges'] ?? 0);
                 $yard   = (float) ($data['yard_charges'] ?? 0);
                 $kanta  = (float) ($data['kanta_charges'] ?? 0);
-                $jobTotal = round($rent + $labour + $yard + $kanta + $detentionTotal + $extraTotal, 2);
 
                 $rateFields = [
                     'trip_type'                   => $tripType,
@@ -245,7 +247,6 @@ class DailyJobController extends Controller
                     // One Way instead.
                     'destination_location_id'     => $data['destination_location_id'] ?? null,
                     'dropoff_port_id'             => $tripType === 'two_way' ? ($data['dropoff_port_id'] ?? null) : null,
-                    'rent'                        => $rent,
                     'labour_charges'              => $labour,
                     'yard_charges'                => $yard,
                     'kanta_charges'               => $kanta,
@@ -267,7 +268,6 @@ class DailyJobController extends Controller
                     'pickup_port_id'              => $job->pickup_port_id,
                     'destination_location_id'     => $job->destination_location_id,
                     'dropoff_port_id'             => $job->dropoff_port_id,
-                    'rent'                        => $job->rent,
                     'labour_charges'              => $job->labour_charges,
                     'yard_charges'                => $job->yard_charges,
                     'kanta_charges'               => $job->kanta_charges,
@@ -279,7 +279,6 @@ class DailyJobController extends Controller
                     'detention_date'              => $job->detention_date,
                     'extra_port_charges_total'    => $job->extra_port_charges_total,
                 ];
-                $jobTotal = $job->job_total;
             } else {
                 // Brand new job, no fill_rates — everything starts clean at
                 // zero, pending an admin.
@@ -288,7 +287,6 @@ class DailyJobController extends Controller
                     'pickup_port_id'              => null,
                     'destination_location_id'     => null,
                     'dropoff_port_id'             => null,
-                    'rent'                        => 0,
                     'labour_charges'              => 0,
                     'yard_charges'                => 0,
                     'kanta_charges'               => 0,
@@ -300,12 +298,10 @@ class DailyJobController extends Controller
                     'detention_date'              => null,
                     'extra_port_charges_total'    => 0,
                 ];
-                $jobTotal = 0;
             }
 
             if ($job) {
                 $job->update(array_merge($basic, $rateFields, [
-                    'job_total'  => round($jobTotal, 2),
                     'updated_by' => auth()->id(),
                 ]));
             } else {
@@ -319,7 +315,10 @@ class DailyJobController extends Controller
                     // Trip Plan no longer carries charges (item 2) — tax
                     // now applies to the job's grand total instead (item 13).
                     'trip_plan_total' => 0,
-                    'job_total'       => round($jobTotal, 2),
+                    // rent / job_total are worked out below, once the
+                    // vehicle rows (each with its own rent) are saved.
+                    'rent'            => 0,
+                    'job_total'       => 0,
                     'created_by'      => auth()->id(),
                     'updated_by'      => auth()->id(),
                 ]));
@@ -359,8 +358,8 @@ class DailyJobController extends Controller
                     // reading a line's own route/trip-plan (e.g. historical
                     // reports) sees the job's real value rather than a
                     // null/default — the job header above is the source of
-                    // truth. Charges are deliberately NOT mirrored (zeroed
-                    // below) since they're no longer per-vehicle amounts —
+                    // truth. The shared charges are deliberately NOT mirrored
+                    // (zeroed below) since they're not per-vehicle amounts —
                     // summing them would double (or N-times) count the
                     // job's actual charges.
                     'route_id'                    => $job->route_id,
@@ -369,7 +368,12 @@ class DailyJobController extends Controller
                     'pickup_port_id'              => $job->pickup_port_id,
                     'destination_location_id'     => $job->destination_location_id,
                     'dropoff_port_id'             => $job->dropoff_port_id,
-                    'rent'                        => 0,
+                    // Rent is the one per-vehicle charge. Without fill_rates
+                    // the row keeps whatever rent an admin already gave it
+                    // (0 for a brand-new row).
+                    'rent'                        => $canFillRates
+                        ? round((float) ($vRow['rent'] ?? 0), 2)
+                        : ($line ? (float) $line->rent : 0),
                     'labour_charges'              => 0,
                     'yard_charges'                => 0,
                     'kanta_charges'               => 0,
@@ -399,6 +403,16 @@ class DailyJobController extends Controller
             // dropped — cascades to their (now unused, going forward)
             // per-vehicle extra port charges automatically.
             $job->vehicles()->whereNotIn('id', $keptLineIds)->delete();
+
+            // job_total is the FULL job amount: every vehicle's own rent plus
+            // the shared charges once per vehicle (same figure the Bill
+            // picks up). rent on the job row is kept as the total rent, for
+            // reference only.
+            $job->load('vehicles');
+            $job->update([
+                'rent'      => $job->direct_rent_total,
+                'job_total' => $job->other_charges_total,
+            ]);
 
             $this->syncDeliveryChallanLinks($job);
 

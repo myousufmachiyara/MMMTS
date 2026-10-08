@@ -88,6 +88,9 @@ class BillController extends Controller
                     'job_total'                => (float) $job->bill_amount,
                     // Vehicle count included so the picker can show "×3"
                     // next to jobs where the multiplier actually applies.
+                    'vehicle_count'            => $job->billableVehicleCount(),
+                    // Containers this job adds to the bill's count — a Muqadum
+                    // (vehicle hire) job adds none.
                     'container_count'          => $isMq ? 0 : $job->billableVehicleCount(),
                 ];
             });
@@ -319,7 +322,7 @@ class BillController extends Controller
     public function print($id)
     {
         $bill = Bill::with([
-            'customer', 'company', 'creator','jobs.vehicles.vehicle', 'jobs.vehicles.deliveryChallan', 'jobs.ptyVehicles', 'jobs.route', 
+            'customer', 'company', 'creator','jobs.vehicles.vehicle', 'jobs.vehicles.deliveryChallan', 'jobs.ptyVehicles', 'jobs.route',
             'jobs.vendor','jobs.sharedExtraPortCharges.port','jobs.madqamLines.vehicle',
         ])->findOrFail($id);
 
@@ -417,16 +420,25 @@ class BillController extends Controller
             $detDateNote = (!$isPty && $job->detention_date)
             ? '<br><span style="font-size:7px;color:#555555;">on ' . $job->detention_date->format('d-m-Y') . '</span>'
             : '';
-            // Item 3 (round 3) — a Direct job's charges are entered once and
-            // billed once per vehicle, so a multi-vehicle job reads, left to
-            // right: charges PER VEHICLE (Detention / Other columns), then the
-            // number of vehicles and the resulting TOTAL (Job Total column).
+            // Item 3 (round 3) — a Direct job's shared charges are entered once
+            // and billed once per vehicle (rent is per vehicle), so a
+            // multi-vehicle job reads, left to right: charges PER VEHICLE
+            // (Detention / Other columns), then the number of vehicles and the
+            // resulting TOTAL (Job Total column).
             // A single-vehicle job (and every Party-to-Party job) prints
             // exactly as it always did — no notes, per-vehicle == total.
             $vehicleCount = $job->billableVehicleCount();
             $multi        = $vehicleCount > 1;
             $perNote      = $multi ? '<br><span style="font-size:7px;color:#555555;">per vehicle</span>' : '';
             $totalNote    = $multi ? '<br><span style="font-size:7px;color:#555555;">× ' . $vehicleCount . ' vehicles</span>' : '';
+            // When the vehicles on a Direct job have DIFFERENT rents there is no
+            // single "per vehicle" figure — the Other column then shows the
+            // average per vehicle (the Job Total is always the exact sum, and
+            // the Charges Breakdown below lists each vehicle's rent).
+            $rentVaries   = $multi && !$isPty && !$isMq && !$job->has_uniform_rent;
+            $otherNote    = $rentVaries
+                ? '<br><span style="font-size:7px;color:#555555;">avg per vehicle</span>'
+                : $perNote;
             $detentionPerVehicle = $isPty ? 0 : (float) $job->detention_total;
             $html .= '<tr>
                 <td>' . ($i + 1) . '</td>
@@ -435,7 +447,7 @@ class BillController extends Controller
                 <td>' . e($isPty ? ($job->vendor->name ?? '—') : ($isMq ? ($job->madqam_vehicle_list ?: '—') : ($job->vehicles->pluck('vehicle.name')->filter()->implode(', ') ?: '—'))) . '</td>
                 <td>' . e($isPty ? ($job->pty_destination ?? '—') : ($isMq ? 'Muqadum' : ($job->route->name ?? ($job->vehicles->pluck('route.name')->filter()->implode(', ') ?: '—')))) . '</td>
                 <td align="right">' . number_format($detentionPerVehicle, 2) . $detDateNote . $perNote . '</td>
-                <td align="right">' . number_format($job->other_charges_per_vehicle, 2) . $perNote . '</td>
+                <td align="right">' . number_format($job->other_charges_per_vehicle, 2) . $otherNote . '</td>
                 <td align="right">' . number_format($job->bill_amount, 2) . $totalNote . '</td>
             </tr>';
         }
@@ -501,6 +513,42 @@ class BillController extends Controller
             return '<tr><td width="80%" align="left">' . $label . $noteHtml . '</td><td width="20%">' . number_format($total, 2) . '</td></tr>';
         };
         $isPtyJob = fn ($job) => $job->job_type === 'party_to_party';
+
+        // Rent is entered per vehicle, so this row SUMS each vehicle's own rent
+        // instead of multiplying one rent by the vehicle count. Same row, same
+        // note style as the others: when a job's vehicles share one rent the
+        // note reads "X per vehicle × N vehicles" exactly as before; when the
+        // rents differ it lists each vehicle's rent instead.
+        $rentTotal  = 0;
+        $rentSingle = 0; // single-vehicle jobs' share, so the note still adds up to the amount
+        $rentNotes  = [];
+        foreach ($bill->jobs as $job) {
+            if ($isPtyJob($job) || $job->job_type === 'madqam') {
+                continue;
+            }
+            $jobRent    = $job->direct_rent_total;
+            $rentTotal += $jobRent;
+            $vc         = $job->billableVehicleCount();
+            $tag        = $multipleJobs ? e($job->job_no) . ': ' : '';
+            if ($vc > 1 && $jobRent != 0.0) {
+                if ($job->has_uniform_rent) {
+                    $rentNotes[] = $tag . number_format($jobRent / $vc, 2) . ' per vehicle × ' . $vc . ' vehicles';
+                } else {
+                    $rentNotes[] = $tag . $job->vehicles->filter(fn ($v) => $v->vehicle_id)
+                        ->map(fn ($v) => e($v->vehicle->name ?? '') . ' ' . number_format((float) $v->rent, 2))
+                        ->implode(', ');
+                }
+            } elseif ($vc === 1) {
+                $rentSingle += $jobRent;
+            }
+        }
+        if ($rentNotes && $rentSingle != 0.0) {
+            $rentNotes[] = 'single-vehicle jobs: ' . number_format($rentSingle, 2);
+        }
+        $rentRowHtml = '<tr><td width="80%" align="left">Rent'
+            . ($rentNotes ? '<br><span style="font-size:8px;color:#555555;">' . implode('; ', $rentNotes) . '</span>' : '')
+            . '</td><td width="20%">' . number_format($rentTotal, 2) . '</td></tr>';
+
         // Extra Port Charges itemised per port (summed across the bill's jobs,
         // each job's charge × its vehicle count, so the lines add up to the
         // "Extra Port Charges" row they sit under).
@@ -530,19 +578,8 @@ class BillController extends Controller
         $detLabelNote = $detDates
             ? '<br><span style="font-size:8px;color:#555555;">Detention date: ' . implode('; ', $detDates) . '</span>'
             : '';
-        $madqamTotal = 0;
-        $madqamNotes = [];
-        foreach ($bill->jobs as $job) {
-            if ($job->job_type !== 'madqam') {
-                continue;
-            }
-            $madqamTotal += (float) $job->job_total;
-            foreach ($job->madqamLines as $ml) {
-                $madqamNotes[] = ($multipleJobs ? e($job->job_no) . ': ' : '')
-                    . e($ml->vehicle->name ?? '') . ' ' . number_format($ml->rate_per_day, 2) . ' × ' . $ml->days_label . ' day(s) = ' . number_format($ml->amount, 2);
-            }
-        }
-                // Muqadum jobs (vehicle hire) have none of the charges above. Their
+
+        // Muqadum jobs (vehicle hire) have none of the charges above. Their
         // rent and guarantee each get one row here (with the per-vehicle
         // working underneath), so the breakdown still adds up to the bill
         // total; the advance and balance follow in a small summary below.
@@ -572,7 +609,7 @@ class BillController extends Controller
         }
         $breakdownHtml = '
         <table border="0.3" cellpadding="4" cellspacing="0" width="100%" style="text-align:right;font-size:10px;">'
-            . $breakdownRow('Rent',                  fn ($job) => $isPtyJob($job) ? 0 : $job->rent)
+            . $rentRowHtml
             . $breakdownRow('Labour Charges',        fn ($job) => $isPtyJob($job) ? 0 : $job->labour_charges)
             . $breakdownRow('Yard Charges',          fn ($job) => $isPtyJob($job) ? 0 : $job->yard_charges)
             . $breakdownRow('Weight Bridge (Kanta)', fn ($job) => $isPtyJob($job) ? 0 : $job->kanta_charges)
@@ -602,8 +639,8 @@ class BillController extends Controller
         $vi = 0;
         foreach ($bill->jobs as $job) {
             if ($job->job_type === 'madqam') {
-                // One row per hired-out vehicle; the rate × days working sits
-                // under the vehicle name (no container / DC on a Madqam job).
+                // One row per hired-out vehicle; its rent sits under the
+                // vehicle name (no container / DC on a Muqadum job).
                 foreach ($job->madqamLines as $ml) {
                     $vi++;
                     $vehicleRowsHtml .= '<tr>

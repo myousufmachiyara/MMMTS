@@ -36,8 +36,8 @@ class FleetReportController extends Controller
             // Item 15
             'company_share'   => $this->companyShare($from, $to),
             'vehicle_pl'      => $this->vehiclePL($from, $to),
-            'vehicle_ledger'  => $this->vehicleLedger($from, $to, $request->vehicle_id),   // ← NEW
-
+            // Per-vehicle ledger (optionally narrowed to one vehicle)
+            'vehicle_ledger'  => $this->vehicleLedger($from, $to, $request->vehicle_id),
         ];
 
         return view('reports.fleet_reports', compact('reports', 'from', 'to', 'vehicles', 'customers', 'vendors', 'routes'));
@@ -62,7 +62,7 @@ class FleetReportController extends Controller
             // Item 15
             'company_share'   => ['Company', 'Revenue', '% of Total'],
             'vehicle_pl'      => ['Vehicle', 'Vehicle No.', 'Trips', 'Revenue', 'Cost', 'Profit'],
-            'vehicle_ledger'  => ['Vehicle', 'Date', 'Job No.', 'Customer', 'Route', 'Container #', 'DC #', 'Bill #', 'Amount', 'Running Total'],   // ← NEW
+            'vehicle_ledger'  => ['Vehicle', 'Date', 'Job No.', 'Customer', 'Route', 'Container #', 'DC #', 'Bill #', 'Amount', 'Running Total'],
         ];
     }
 
@@ -76,11 +76,11 @@ class FleetReportController extends Controller
             'customer_routes' => 'Customer x Route Usage',
             'company_share'   => 'Company Wise % Share',
             'vehicle_pl'      => 'Vehicle P&L (Revenue Only)',
-            'vehicle_ledger'  => 'Vehicle Ledger',   // ← NEW
+            'vehicle_ledger'  => 'Vehicle Ledger',
         ];
     }
 
-    private function buildReport(string $key, $from, $to)
+    private function buildReport(string $key, $from, $to, $vehicleId = null)
     {
         return match ($key) {
             'vehicle_wise'    => $this->vehicleWise($from, $to),
@@ -90,7 +90,7 @@ class FleetReportController extends Controller
             'customer_routes' => $this->customerRoutes($from, $to),
             'company_share'   => $this->companyShare($from, $to),
             'vehicle_pl'      => $this->vehiclePL($from, $to),
-            'vehicle_ledger'  => $this->vehicleLedger($from, $to, $vehicleId),   // ← NEW
+            'vehicle_ledger'  => $this->vehicleLedger($from, $to, $vehicleId),
             default           => null,
         };
     }
@@ -132,6 +132,7 @@ class FleetReportController extends Controller
                 $r['vehicle'], $r['vehicle_no'], $r['trip_count'], number_format($r['revenue'], 2),
                 $r['cost'] ?? 'N/A', $r['profit'] ?? 'N/A',
             ])->all(),
+            // One row per trip, then a Total row closing each vehicle's block.
             'vehicle_ledger' => collect($data)->flatMap(function ($block) {
                 $rows = collect($block['lines'])->map(fn ($l) => [
                     $block['vehicle'] . ' (' . $block['vehicle_no'] . ')', $l['date'], $l['job_no'], $l['customer'], $l['route'],
@@ -248,14 +249,16 @@ class FleetReportController extends Controller
 
         return $pdf->Output($label . '.pdf', 'S');
     }
+
     // ── Vehicle Ledger ──
     //
     // One block per vehicle (or just the one picked in the filter): every trip
     // it ran in the period, oldest first, with a running total. A trip's amount
-    // is the job total UNDIVIDED — the same per-vehicle convention as
-    // vehicleWise() (each vehicle on a job is billed as if it made the whole
-    // trip). Only Direct jobs have one of OUR vehicles; a Party-to-Party job
-    // runs on the vendor's vehicle, so it isn't part of any vehicle ledger.
+    // is that vehicle's own rent plus the job's shared charges — the same
+    // per-vehicle convention as vehicleWise() (each vehicle on a job is billed
+    // as if it made the whole trip). Only Direct jobs have one of OUR
+    // vehicles; a Party-to-Party job runs on the vendor's vehicle, so it isn't
+    // part of any vehicle ledger.
     // No expense side: nothing in the system (vouchers included) is tied to a
     // vehicle, so there is no cost data to put against it.
     private function vehicleLedger($from, $to, $vehicleId = null)
@@ -286,7 +289,7 @@ class FleetReportController extends Controller
                         'container_no' => $line->container_no ?: '—',
                         'dc_no'        => $line->deliveryChallan->dc_no ?? '—',
                         'bill_no'      => $job->bill->bill_no ?? 'Unbilled',
-                        'amount'       => round((float) $job->job_total, 2),
+                        'amount'       => $job->vehicleAmount($line),
                     ]);
                 }
             });
@@ -313,7 +316,7 @@ class FleetReportController extends Controller
             ->sortBy('vehicle')
             ->values();
     }
-    
+
     private function jobsInRange($from, $to)
     {
         // FIX — daily_jobs.vehicle_id is a legacy, pre-multi-vehicle column
@@ -322,7 +325,8 @@ class FleetReportController extends Controller
         // Eager-load the real vehicles.vehicle chain so every report below
         // can read a job's actual vehicle(s). Also eager-loads each
         // vehicle's companies (item 15's companyShare() needs this).
-       return DailyJob::with(['vehicles.vehicle.companies', 'ptyVehicles', 'customer', 'vendor', 'route'])->whereBetween('date', [$from, $to]);
+        return DailyJob::with(['vehicles.vehicle.companies', 'ptyVehicles', 'customer', 'vendor', 'route'])
+            ->whereBetween('date', [$from, $to]);
     }
 
     // ── Vehicle Wise: trips run + revenue per vehicle (Direct jobs only — party-to-party has no our-vehicle) ──
@@ -332,8 +336,12 @@ class FleetReportController extends Controller
     // report showed nothing for current data. Now built from each job's
     // real vehicle-rows (job->vehicles) instead. A job's rent/labour/yard/
     // detention/etc. charges are shared once across the whole job (not
-    // tracked per vehicle), so when a job has more than one vehicle its
-    // job_total is split evenly across them for this report.
+    // tracked per vehicle) — item 3 (round 3) changed what that means for
+    // billing purposes: each vehicle on the job is billed as if it made the
+    // same full trip on its own (see DailyJob::getOtherChargesTotalAttribute()),
+    // so each vehicle's own share is its OWN rent (rent can differ per
+    // vehicle) plus the job's shared charges, undivided — see
+    // DailyJob::vehicleAmount().
     private function vehicleWise($from, $to)
     {
         $lines = collect();
@@ -346,9 +354,8 @@ class FleetReportController extends Controller
                 if ($vehicleLines->isEmpty()) {
                     return;
                 }
-                $share = round((float) $job->job_total, 2);
-
                 foreach ($vehicleLines as $line) {
+                    $share = $job->vehicleAmount($line);
                     $lines->push([
                         'vehicle_id' => $line->vehicle_id,
                         'vehicle'    => $line->vehicle->name ?? '—',
@@ -391,13 +398,16 @@ class FleetReportController extends Controller
     // "Our Companies" (see OurCompany/company_vehicle) aren't billing
     // parties — they're the umbrella entities a vehicle operates under. A
     // vehicle can be linked to more than one company (plain many-to-many,
-    // no stored ownership percentage anywhere), so this uses the same
-    // even-split convention as vehicleWise(): a job's total is split evenly
-    // across its vehicles, and — when a vehicle itself is linked to more
-    // than one company — that vehicle's share is split evenly again across
-    // its companies. A vehicle linked to no company falls into an
-    // "Unassigned" bucket rather than being silently dropped, so the
-    // percentages below always add up to 100%.
+    // no stored ownership percentage anywhere). Per-VEHICLE, this uses the
+    // same undivided-share convention as vehicleWise() (each vehicle is
+    // billed as if it made the same full trip on its own, so its share of the
+    // job is its own rent plus the shared charges — DailyJob::vehicleAmount());
+    // when a vehicle itself is linked to more than one
+    // company, THAT vehicle's own share is still split evenly across its
+    // companies (no stored per-company ownership % exists to split by
+    // instead). A vehicle linked to no company falls into an "Unassigned"
+    // bucket rather than being silently dropped, so the percentages below
+    // always add up to 100%.
     private function companyShare($from, $to)
     {
         $amounts = collect(); // company_id (or 'unassigned') => running total
@@ -411,9 +421,8 @@ class FleetReportController extends Controller
                 if ($vehicleLines->isEmpty()) {
                     return;
                 }
-                $vehicleShare = (float) $job->job_total;
-
                 foreach ($vehicleLines as $line) {
+                    $vehicleShare = $job->vehicleAmount($line);
                     $companies = $line->vehicle?->companies ?? collect();
                     $cCount    = $companies->count();
 
@@ -480,6 +489,7 @@ class FleetReportController extends Controller
                 return [
                     'customer'        => $customer->name ?? '—',
                     'job_count'       => $jobs->count(),
+                    // FIX — was reading the legacy singular vehicle relation.
                     'vehicles_used'   => $this->distinctVehicleCount($jobs),
                     'routes_used'     => $jobs->where('job_type', 'direct')->pluck('route.name')->filter()->unique()->count(),
                     // Item 3 (round 3) — other_charges_total already embeds
@@ -496,6 +506,7 @@ class FleetReportController extends Controller
             ->values();
     }
 
+    // ── Vendor Wise: Party-to-Party ledger — cost/sale/profit/advance/guarantee/balance per vendor ──
     private function vendorWise($from, $to)
     {
         return $this->jobsInRange($from, $to)
@@ -537,6 +548,7 @@ class FleetReportController extends Controller
                 return [
                     'route'        => $route->name ?? '—',
                     'trip_count'   => $jobs->count(),
+                    // FIX — was reading the legacy singular vehicle relation.
                     'vehicles_used' => $this->distinctVehicleCount($jobs),
                     'customers'    => $jobs->pluck('customer.name')->filter()->unique()->count(),
                     // Item 3 (round 3) — see customerWise()'s note above.
