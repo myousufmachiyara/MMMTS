@@ -301,6 +301,7 @@ class InvoiceController extends Controller
         $pdf->SetFont('helvetica', 'B', 14);
         $pdf->SetXY(120, 12);
         $pdf->Cell(80, 8, $invoice->is_taxable ? 'SALES TAX INVOICE' : 'SALES INVOICE', 0, 1, 'R');
+        $pdf->Cell(80, 8, 'NTN:E557412', 0, 1, 'R');
 
         // A fixed divider line (mirroring Bill's letterhead) placed clear of
         // the 22mm-tall logo (bottom edge ~30mm) and of the text block above
