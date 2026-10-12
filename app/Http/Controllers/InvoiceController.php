@@ -320,6 +320,7 @@ class InvoiceController extends Controller
                 <td width="60%">
                     <b>' . e($invoice->customer->name ?? '') . '</b><br>
                     ' . e($invoice->customer->address ?? '') . '<br>
+                    ' . e($invoice->customer->remarks ?? '') . '<br>
                     ' . e($invoice->customer->trn ?? '') . '
                 </td>
                 <td width="40%">
