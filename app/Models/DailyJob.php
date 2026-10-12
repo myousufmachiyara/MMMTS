@@ -99,6 +99,7 @@ class DailyJob extends Model
         'date'           => 'date',
         'end_date'       => 'date',
         'dc_date'        => 'date',
+        'detention_date' => 'date',
     ];
 
     public function vehicle()
