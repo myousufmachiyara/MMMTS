@@ -416,10 +416,15 @@ class BillController extends Controller
         foreach ($bill->jobs as $i => $job) {
             $isPty = $job->job_type === 'party_to_party';
             $isMq  = $job->job_type === 'madqam';
-            $detentionPerVehicle = $isPty ? 0 : (float) $job->detention_total;
-            $detDateNote = (!$isPty && $job->detention_date)
-            ? '<br><span style="font-size:7px;color:#555555;">on ' . $job->detention_date->format('d-m-Y') . '</span>'
-            : '';
+            // Detention note under the amount: the number of detention days on
+            // a job saved on the current form, or the single date an older job
+            // was saved with.
+            $detDateNote = '';
+            if (!$isPty && !$isMq && $job->detention_days > 0) {
+                $detDateNote = '<br><span style="font-size:7px;color:#555555;">' . $job->detention_days . ' ' . ($job->detention_days === 1 ? 'day' : 'days') . '</span>';
+            } elseif (!$isPty && $job->detention_date) {
+                $detDateNote = '<br><span style="font-size:7px;color:#555555;">on ' . $job->detention_date->format('d-m-Y') . '</span>';
+            }
             // Item 3 (round 3) — a Direct job's shared charges are entered once
             // and billed once per vehicle (rent is per vehicle), so a
             // multi-vehicle job reads, left to right: charges PER VEHICLE
@@ -435,18 +440,23 @@ class BillController extends Controller
             // single "per vehicle" figure — the Other column then shows the
             // average per vehicle (the Job Total is always the exact sum, and
             // the Charges Breakdown below lists each vehicle's rent).
-            $rentVaries   = $multi && !$isPty && !$isMq && !$job->has_uniform_rent;
+            $rentVaries   = $multi && !$isPty && !$isMq && !$job->has_uniform_vehicle_charges;
             $otherNote    = $rentVaries
                 ? '<br><span style="font-size:7px;color:#555555;">avg per vehicle</span>'
                 : $perNote;
-            $detentionPerVehicle = $isPty ? 0 : (float) $job->detention_total;
+            // Detention is per vehicle too (and can differ), so the column shows
+            // the per-vehicle figure — the average when the vehicles differ.
+            $detentionPerVehicle = ($isPty || $isMq) ? 0 : round((float) $job->detention_charges_total / $vehicleCount, 2);
+            $detNote = ($multi && !$isPty && !$isMq && !$job->has_uniform_detention)
+                ? '<br><span style="font-size:7px;color:#555555;">avg per vehicle</span>'
+                : $perNote;
             $html .= '<tr>
                 <td>' . ($i + 1) . '</td>
                 <td>' . e($job->job_no) . '</td>
                 <td>' . $job->date->format('d-m-Y') . '</td>
                 <td>' . e($isPty ? ($job->vendor->name ?? '—') : ($isMq ? ($job->madqam_vehicle_list ?: '—') : ($job->vehicles->pluck('vehicle.name')->filter()->implode(', ') ?: '—'))) . '</td>
                 <td>' . e($isPty ? ($job->pty_destination ?? '—') : ($isMq ? 'Muqadum' : ($job->route->name ?? ($job->vehicles->pluck('route.name')->filter()->implode(', ') ?: '—')))) . '</td>
-                <td align="right">' . number_format($detentionPerVehicle, 2) . $detDateNote . $perNote . '</td>
+                <td align="right">' . number_format($detentionPerVehicle, 2) . $detDateNote . $detNote . '</td>
                 <td align="right">' . number_format($job->other_charges_per_vehicle, 2) . $otherNote . '</td>
                 <td align="right">' . number_format($job->bill_amount, 2) . $totalNote . '</td>
             </tr>';
@@ -568,16 +578,59 @@ class BillController extends Controller
             $portRowsHtml .= '<tr style="color:#444444;font-size:9px;"><td width="80%" align="left">&nbsp;&nbsp;&nbsp;- ' . e($name) . '</td><td width="20%">' . number_format($amt, 2) . '</td></tr>';
         }
 
-        // Detention dates, tagged with the job no. when the bill has several jobs.
-        $detDates = [];
+        // Detention is per vehicle, per day, for every day after the first (the
+        // first day is the Rent). This row SUMS each vehicle's own detention,
+        // plus the old shared detention (x vehicles) of a job saved before
+        // that. The label carries each job's detention period; the note under
+        // it spells out the working, like the Rent row above.
+        $detTotal  = 0;
+        $detSingle = 0; // single-vehicle old-style jobs' share, so the notes still add up
+        $detNotes  = [];
+        $detPeriods = [];
         foreach ($bill->jobs as $job) {
-            if (!$isPtyJob($job) && $job->detention_date) {
-                $detDates[] = ($multipleJobs ? e($job->job_no) . ': ' : '') . $job->detention_date->format('d-m-Y');
+            if ($isPtyJob($job) || $job->job_type === 'madqam') {
+                continue;
+            }
+            $tag       = $multipleJobs ? e($job->job_no) . ': ' : '';
+            $vc        = $job->billableVehicleCount();
+            $legacyPer = (float) $job->detention_total;
+            $newTotal  = $job->direct_detention_total;
+            $detTotal += $legacyPer * $vc + $newTotal;
+
+            if ($job->detention_days > 0) {
+                $detPeriods[] = $tag . $job->date->format('d-m-Y') . ' to ' . $job->end_date->format('d-m-Y')
+                    . ' (' . $job->detention_days . ' ' . ($job->detention_days === 1 ? 'day' : 'days') . ')';
+            } elseif ($job->detention_date) {
+                $detPeriods[] = $tag . $job->detention_date->format('d-m-Y');
+            }
+
+            $parts = [];
+            if ($legacyPer != 0.0 && $vc > 1) {
+                $parts[] = number_format($legacyPer, 2) . ' per vehicle × ' . $vc . ' vehicles';
+            } elseif ($legacyPer != 0.0) {
+                $detSingle += $legacyPer;
+            }
+            if ($newTotal != 0.0) {
+                if ($vc > 1 && !$job->has_uniform_detention) {
+                    $parts[] = $job->vehicles->filter(fn ($v) => $v->vehicle_id)
+                        ->map(fn ($v) => e($v->vehicle->name ?? '') . ' ' . number_format($job->lineDetention($v), 2))
+                        ->implode(', ');
+                } else {
+                    $parts[] = number_format($newTotal / $vc / $job->detention_days, 2) . ' per day × ' . $job->detention_days
+                        . ' days' . ($vc > 1 ? ' × ' . $vc . ' vehicles' : '');
+                }
+            }
+            if ($parts) {
+                $detNotes[] = $tag . implode(' + ', $parts);
             }
         }
-        $detLabelNote = $detDates
-            ? '<br><span style="font-size:8px;color:#555555;">Detention date: ' . implode('; ', $detDates) . '</span>'
-            : '';
+        if ($detNotes && $detSingle != 0.0) {
+            $detNotes[] = 'single-vehicle jobs: ' . number_format($detSingle, 2);
+        }
+        $detRowHtml = '<tr><td width="80%" align="left">Detention Charges'
+            . ($detPeriods ? '<br><span style="font-size:8px;color:#555555;">Detention: ' . implode('; ', $detPeriods) . '</span>' : '')
+            . ($detNotes ? '<br><span style="font-size:8px;color:#555555;">' . implode('; ', $detNotes) . '</span>' : '')
+            . '</td><td width="20%">' . number_format($detTotal, 2) . '</td></tr>';
 
         // Muqadum jobs (vehicle hire) have none of the charges above. Their
         // rent and guarantee each get one row here (with the per-vehicle
@@ -615,7 +668,7 @@ class BillController extends Controller
             . $breakdownRow('Weight Bridge (Kanta)', fn ($job) => $isPtyJob($job) ? 0 : $job->kanta_charges)
             . $breakdownRow('Extra Port Charges',    fn ($job) => $isPtyJob($job) ? 0 : $job->extra_port_charges_total)
             . $portRowsHtml                                                                                    // ← NEW
-            . $breakdownRow('Detention Charges' . $detLabelNote, fn ($job) => $isPtyJob($job) ? 0 : $job->detention_total)   // ← label changed
+            . $detRowHtml
             . $madqamRowHtml
         . '</table>';
         $pdf->writeHTML($breakdownHtml, true, false, true, false, '');

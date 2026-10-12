@@ -34,8 +34,11 @@
             'vehicle_id'             => $v->vehicle_id,
             'container_no'           => $v->container_no,
             'delivery_challan_id'    => $v->delivery_challan_id,
-            // Rent is the one charge entered per vehicle.
+            // Rent (the first day) and the per-day detention rates are
+            // entered per vehicle.
             'rent'                   => (float) $v->rent,
+            'detention_day_charge'   => (float) $v->detention_day_charge,
+            'detention_night_charge' => (float) $v->detention_night_charge,
             'delivery_challan_label' => $v->deliveryChallan ? ($v->deliveryChallan->dc_no . ' — ' . $v->deliveryChallan->dc_date->format('d-m-Y')) : null,
         ];
     })->values() : [];
@@ -72,20 +75,16 @@
         'labour_charges'              => $job->labour_charges ?: ($firstLine->labour_charges ?? 0),
         'yard_charges'                => $job->yard_charges ?: ($firstLine->yard_charges ?? 0),
         'kanta_charges'               => $job->kanta_charges ?: ($firstLine->kanta_charges ?? 0),
-        'detention_first_day_charges' => $job->detention_first_day_charges ?: ($firstLine->detention_first_day_charges ?? 0),
-        'detention_next_day_rate'     => $job->detention_next_day_rate ?: ($firstLine->detention_next_day_rate ?? 0),
-        'detention_extra_days'        => $job->detention_extra_days ?: ($firstLine->detention_extra_days ?? 0),
-        'detention_night_rate'        => $job->detention_night_rate ?: ($firstLine->detention_night_rate ?? 0),
-        // Item 1 (round 3) — job-level only, nothing to fall back to on
-        // $firstLine (vehicle-rows never carried their own detention date).
-        'detention_date'              => optional($job->detention_date)->format('Y-m-d'),
+        // Detention is per vehicle now (see the Vehicles table). A job saved
+        // before that change still carries its old shared detention (per
+        // vehicle); it is kept as is and only shown here, never edited.
+        'legacy_detention'            => (float) $job->detention_total,
         'extra_port'                  => $job->sharedExtraPortCharges->map(fn ($ep) => ['port_id' => $ep->port_id, 'charges' => $ep->charges])->values(),
     ] : [
         'route_id' => null, 'item_description' => null, 'trip_type' => 'one_way',
         'pickup_port_id' => null, 'destination_location_id' => null, 'dropoff_port_id' => null,
         'labour_charges' => 0, 'yard_charges' => 0, 'kanta_charges' => 0,
-        'detention_first_day_charges' => 0, 'detention_next_day_rate' => 0,
-        'detention_extra_days' => 0, 'detention_night_rate' => 0, 'detention_date' => null,
+        'legacy_detention' => 0,
         'extra_port' => [],
     ];
 @endphp
@@ -121,11 +120,19 @@
         <header class="card-header"><h2 class="card-title">Job Info</h2></header>
         <div class="card-body">
             <div class="row form-group">
-                <div class="col-lg-3 mb-2">
-                    <label>Date <span class="text-danger">*</span></label>
+                <div class="col-lg-2 mb-2">
+                    <label>Job Start Date <span class="text-danger">*</span></label>
                     <input type="date" class="form-control" name="date" id="job_date" value="{{ old('date', $isEdit ? $job->date->format('Y-m-d') : date('Y-m-d')) }}" required>
                 </div>
-                <div class="col-lg-5 mb-2">
+                {{-- Detention days = end date - start date; the first day is
+                     covered by each vehicle's Rent. A job saved before this
+                     field existed has no end date and shows its start date. --}}
+                <div class="col-lg-2 mb-2">
+                    <label>Job End Date <span class="text-danger">*</span></label>
+                    <input type="date" class="form-control" name="end_date" id="job_end_date" value="{{ old('end_date', $isEdit ? optional($job->end_date ?? $job->date)->format('Y-m-d') : date('Y-m-d')) }}" required>
+                    <small class="text-muted" id="detentionDaysNote"></small>
+                </div>
+                <div class="col-lg-4 mb-2">
                     <label>Customer <span class="text-danger">*</span></label>
                     <select class="form-control select2-js" id="customer_id" name="customer_id" required>
                         <option value="" disabled {{ $isEdit ? '' : 'selected' }}>Select Customer</option>
@@ -196,7 +203,11 @@
                                  job; every other charge above is shared and applied
                                  once per vehicle. Rates are admin-only. --}}
                             @if($canFillRates)
-                                <th style="width:14%">Rent</th>
+                                <th style="width:9%">Rent <small class="text-muted">(1st day)</small></th>
+                                <th style="width:9%">Detention Day Rate</th>
+                                <th style="width:9%">Detention Night Rate</th>
+                                <th style="width:9%">Detention Total / Day</th>
+                                <th style="width:10%">Vehicle Total</th>
                             @endif
                             <th style="width:5%"></th>
                         </tr>
@@ -309,49 +320,60 @@ function vehicleCount() {
     return Math.max(count, 1);
 }
 
+// Detention days = job end date - job start date. The first day is NOT
+// counted: it is covered by each vehicle's Rent. Mirrors
+// DailyJob::getDetentionDaysAttribute() on the backend.
+function detentionDays() {
+    var s = document.getElementById('job_date').value;
+    var e = document.getElementById('job_end_date').value;
+    if (!s || !e) return 0;
+    var sp = s.split('-'), ep = e.split('-');
+    var ms = Date.UTC(+sp[0], +sp[1] - 1, +sp[2]);
+    var me = Date.UTC(+ep[0], +ep[1] - 1, +ep[2]);
+    return Math.max(0, Math.round((me - ms) / 86400000));
+}
+
 function recalcTotal() {
     var num = function(id) { var el = document.getElementById(id); return el ? (parseFloat(el.value) || 0) : 0; };
 
-    var first = num('detention_first');
-    var nextRate = num('detention_next');
-    var extraDays = parseInt(document.getElementById('detention_days') ? document.getElementById('detention_days').value || 0 : 0, 10) || 0;
-    var nightRate = num('detention_night');
-    // Item 7 fix: night charges only apply once extra_days is GREATER THAN
-    // 1 (2 or more) — at exactly 1 extra day there is no "night" yet, so
-    // night_rate must contribute 0 rather than being charged unconditionally.
-    var nightCharges = extraDays > 1 ? (nightRate * extraDays) : 0;
-    var detentionTotal = first + (nextRate * extraDays) + nightCharges;
-    var detentionTotalEl = document.getElementById('detention_total_display');
-    if (detentionTotalEl) detentionTotalEl.value = fmt(detentionTotal);
+    var days = detentionDays();
+    var daysNote = document.getElementById('detentionDaysNote');
+    if (daysNote) daysNote.textContent = days + (days === 1 ? ' detention day' : ' detention days') + ' (first day = rent)';
 
     var extraPortTotal = 0;
     document.querySelectorAll('.extra-port-calc').forEach(function(el) { extraPortTotal += (parseFloat(el.value) || 0); });
 
     var labour = num('labour'), yard = num('yard'), kanta = num('kanta');
-    // Item 3 (round 3) follow-up — this preview used to stop here, showing
-    // only the once-entered rate total even when the job has several
-    // vehicles. The REAL bill amount multiplies by how many vehicles are on
-    // the job (see DailyJob::getOtherChargesTotalAttribute()), so the
-    // preview needs to do the same or it quietly undersells what Save will
-    // actually bill once a Bill is created from this job.
-    // Rent is entered on each vehicle row (it can differ per vehicle), so it
-    // is SUMMED over the vehicles; the shared charges are applied once per
-    // vehicle.
-    var rentTotal = 0;
+    // Rent (first day) and detention are entered on each vehicle row and can
+    // differ per vehicle, so they are SUMMED over the vehicles:
+    //   vehicle total = rent + (day rate + night rate) x detention days
+    // The shared charges (labour, yard, kanta, extra ports — and the old-style
+    // detention of a job saved before detention became per-vehicle) are applied
+    // once per vehicle. Mirrors DailyJob::getOtherChargesTotalAttribute().
+    var vehiclesTotal = 0;
     document.querySelectorAll('#vehicleRows > tr').forEach(function(tr) {
         var sel = tr.querySelector('select[name$="[vehicle_id]"]');
         var rentEl = tr.querySelector('.vehicle-rent');
-        if (sel && sel.value && rentEl) rentTotal += (parseFloat(rentEl.value) || 0);
+        if (!rentEl) return;
+        var rent = parseFloat(rentEl.value) || 0;
+        var day = parseFloat(tr.querySelector('.vehicle-det-day').value) || 0;
+        var night = parseFloat(tr.querySelector('.vehicle-det-night').value) || 0;
+        var perDay = day + night;
+        var vehicleTotal = rent + perDay * days;
+        tr.querySelector('.vehicle-det-perday').value = fmt(perDay);
+        tr.querySelector('.vehicle-total').value = fmt(vehicleTotal);
+        if (sel && sel.value) vehiclesTotal += vehicleTotal;
     });
-    var sharedPerVehicle = labour + yard + kanta + detentionTotal + extraPortTotal;
+    var legacyDetention = parseFloat(sharedSeed.legacy_detention) || 0;
+    var sharedPerVehicle = labour + yard + kanta + legacyDetention + extraPortTotal;
     var vCount = vehicleCount();
-    var jobTotal = rentTotal + sharedPerVehicle * vCount;
+    var jobTotal = vehiclesTotal + sharedPerVehicle * vCount;
     document.getElementById('job_total').value = fmt(jobTotal);
 
     var noteEl = document.getElementById('vehicleMultiplierNote');
     if (noteEl) {
-        noteEl.textContent = vCount > 1
-            ? ('Rent ' + fmt(rentTotal) + ' + ' + fmt(sharedPerVehicle) + ' other charges per vehicle × ' + vCount + ' vehicles')
+        noteEl.textContent = canFillRates
+            ? ('Vehicles (rent + detention) ' + fmt(vehiclesTotal) + (sharedPerVehicle ? ' + ' + fmt(sharedPerVehicle) + ' other charges per vehicle × ' + vCount + ' vehicle' + (vCount > 1 ? 's' : '') : ''))
             : '';
     }
 }
@@ -392,17 +414,9 @@ function renderRateFields() {
         '<div class="col-lg-4 mb-2"><label>Yard</label><input type="number" step="any" class="form-control" id="yard" name="yard_charges" value="' + (row.yard_charges || 0) + '" oninput="recalcTotal()"></div>' +
         '<div class="col-lg-4 mb-2"><label>Weight Bridge (Kanta)</label><input type="number" step="any" class="form-control" id="kanta" name="kanta_charges" value="' + (row.kanta_charges || 0) + '" oninput="recalcTotal()"></div>' +
     '</div>' +
-    '<div class="row form-group">' +
-        '<div class="col-lg-12"><label class="mb-0"><strong>Detention Charges</strong> <small class="text-muted">(night rate applies only once extra days is more than 1)</small></label></div>' +
-        '<div class="col-lg-3 mb-2"><label>Day 1 Charges</label><input type="number" step="any" class="form-control" id="detention_first" name="detention_first_day_charges" value="' + (row.detention_first_day_charges || 0) + '" oninput="recalcTotal()"></div>' +
-        '<div class="col-lg-2 mb-2"><label>Next Day Rate</label><input type="number" step="any" class="form-control" id="detention_next" name="detention_next_day_rate" value="' + (row.detention_next_day_rate || 0) + '" oninput="recalcTotal()"></div>' +
-        '<div class="col-lg-2 mb-2"><label>Extra Days</label><input type="number" step="1" min="0" class="form-control" id="detention_days" name="detention_extra_days" value="' + (row.detention_extra_days || 0) + '" oninput="recalcTotal()"></div>' +
-        '<div class="col-lg-2 mb-2"><label>Night Rate</label><input type="number" step="any" class="form-control" id="detention_night" name="detention_night_rate" value="' + (row.detention_night_rate || 0) + '" oninput="recalcTotal()"></div>' +
-        '<div class="col-lg-3 mb-2"><label>Detention Total</label><input type="text" class="form-control" id="detention_total_display" readonly value="0.00"></div>' +
-        // Item 1 (round 3) — a single, optional date alongside the charge
-        // fields above; shared once across the job like they are.
-        '<div class="col-lg-3 mb-2"><label>Detention Date</label><input type="date" class="form-control" id="detention_date" name="detention_date" value="' + (row.detention_date || '') + '"></div>' +
-    '</div>' +
+    (row.legacy_detention > 0
+        ? '<div class="alert alert-info py-2">This job was saved with the old shared detention of <strong>' + fmt(row.legacy_detention) + '</strong> per vehicle. It is kept as is and still billed; detention for the Vehicles below is charged per day after the first.</div>'
+        : '') +
     '<div class="mb-2">' +
         '<div class="d-flex justify-content-between align-items-center">' +
             '<label class="mb-0">Extra Port Charges</label>' +
@@ -550,11 +564,15 @@ function addVehicleRow(row) {
 
     // A new row starts with the previous row's rent (most jobs use the same
     // rent for every vehicle); change it where a vehicle's rent differs.
-    var rentValue = row.rent;
-    if (rentValue === undefined || rentValue === null) {
-        var prevRent = document.querySelector('#vehicleRows > tr:last-child .vehicle-rent');
-        rentValue = prevRent ? prevRent.value : 0;
-    }
+    var prevRow = document.querySelector('#vehicleRows > tr:last-child');
+    var carry = function(key, cls) {
+        if (row[key] !== undefined && row[key] !== null) return row[key];
+        var el = prevRow ? prevRow.querySelector(cls) : null;
+        return el ? el.value : 0;
+    };
+    var rentValue = carry('rent', '.vehicle-rent');
+    var dayValue = carry('detention_day_charge', '.vehicle-det-day');
+    var nightValue = carry('detention_night_charge', '.vehicle-det-night');
 
     var tr = document.createElement('tr');
     tr.id = 'vehicleRow_' + vi;
@@ -567,7 +585,11 @@ function addVehicleRow(row) {
         // BASIC field now (see the "Delivery Challan" <th> above).
         '<td><select class="form-control select2-js" id="dc_select_' + vi + '" name="vehicles[' + vi + '][delivery_challan_id]"><option value="">— Not linked —</option></select></td>' +
         (canFillRates
-            ? '<td><input type="number" step="any" min="0" class="form-control vehicle-rent" name="vehicles[' + vi + '][rent]" value="' + rentValue + '" oninput="recalcTotal()"></td>'
+            ? '<td><input type="number" step="any" min="0" class="form-control vehicle-rent" name="vehicles[' + vi + '][rent]" value="' + rentValue + '" oninput="recalcTotal()"></td>' +
+              '<td><input type="number" step="any" min="0" class="form-control vehicle-det-day" name="vehicles[' + vi + '][detention_day_charge]" value="' + dayValue + '" oninput="recalcTotal()"></td>' +
+              '<td><input type="number" step="any" min="0" class="form-control vehicle-det-night" name="vehicles[' + vi + '][detention_night_charge]" value="' + nightValue + '" oninput="recalcTotal()"></td>' +
+              '<td><input type="text" class="form-control vehicle-det-perday" readonly value="0.00"></td>' +
+              '<td><input type="text" class="form-control vehicle-total fw-bold" readonly value="0.00"></td>'
             : '') +
         '<td class="text-center"><button type="button" class="btn btn-link text-danger p-0 remove-vehicle-row"><i class="fas fa-trash-alt"></i></button></td>';
 
@@ -644,6 +666,20 @@ document.getElementById('rateFieldsWrap').addEventListener('input', function(e) 
     if (e.target.classList.contains('extra-port-calc')) recalcTotal();
 });
 
+// End date can never be before the start date; moving the start date past
+// the end date drags the end date along with it.
+function syncJobDates(fromStart) {
+    var startEl = document.getElementById('job_date');
+    var endEl = document.getElementById('job_end_date');
+    endEl.min = startEl.value || '';
+    if (startEl.value && (!endEl.value || endEl.value < startEl.value)) endEl.value = startEl.value;
+    recalcTotal();
+}
+document.getElementById('job_date').addEventListener('change', function() { syncJobDates(true); });
+document.getElementById('job_date').addEventListener('input', function() { syncJobDates(true); });
+document.getElementById('job_end_date').addEventListener('change', function() { syncJobDates(false); });
+document.getElementById('job_end_date').addEventListener('input', function() { syncJobDates(false); });
+
 document.getElementById('customer_id').addEventListener('change', function() {
     if (canFillRates) {
         filterDestinationOptions(this.value, null);
@@ -662,6 +698,7 @@ $(document).ready(function() {
     initSelect2($('#jobForm'));
 
     renderRateFields();
+    document.getElementById('job_end_date').min = document.getElementById('job_date').value || '';
 
     if (existingVehicles.length) {
         existingVehicles.forEach(function(v) { addVehicleRow(v); });

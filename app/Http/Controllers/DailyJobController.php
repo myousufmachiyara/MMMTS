@@ -100,6 +100,7 @@ class DailyJobController extends Controller
     {
         return [
             'date'        => 'required|date',
+            'end_date'    => 'nullable|date|after_or_equal:date',
             'customer_id' => 'required|exists:chart_of_accounts,id',
             'remarks'     => 'nullable|string|max:1000',
             'mark_complete' => 'nullable|boolean',
@@ -123,12 +124,6 @@ class DailyJobController extends Controller
             'labour_charges'              => 'nullable|numeric|min:0',
             'yard_charges'                => 'nullable|numeric|min:0',
             'kanta_charges'               => 'nullable|numeric|min:0',
-            'detention_first_day_charges' => 'nullable|numeric|min:0',
-            'detention_next_day_rate'     => 'nullable|numeric|min:0',
-            'detention_extra_days'        => 'nullable|integer|min:0',
-            'detention_night_rate'        => 'nullable|numeric|min:0',
-            'detention_date'              => 'nullable|date',
-
             'extra_port'                  => 'nullable|array',
             'extra_port.*.port_id'        => 'nullable|exists:ports,id',
             'extra_port.*.charges'        => 'nullable|numeric|min:0',
@@ -144,6 +139,10 @@ class DailyJobController extends Controller
             // Rent is the one charge that can differ from vehicle to vehicle
             // (admin-only like every other rate — ignored without fill_rates).
             'vehicles.*.rent'             => 'nullable|numeric|min:0',
+            // Detention is per vehicle, per day, charged for every day after
+            // the first (see end_date above). Admin-only like rent.
+            'vehicles.*.detention_day_charge'   => 'nullable|numeric|min:0',
+            'vehicles.*.detention_night_charge' => 'nullable|numeric|min:0',
         ];
     }
 
@@ -198,7 +197,9 @@ class DailyJobController extends Controller
     // on the vehicle's own row.
     private function persistDirect(Request $request, ?DailyJob $job = null)
     {
-        $data = $request->validate($this->rules());
+        $data = $request->validate($this->rules(), [
+            'end_date.after_or_equal' => 'Job end date cannot be before the job start date.',
+        ]);
         $canFillRates = $this->canFillRates();
 
         return DB::transaction(function () use ($data, $job, $canFillRates, $request) {
@@ -208,6 +209,8 @@ class DailyJobController extends Controller
                 'route_id'         => $data['route_id'],
                 'item_description' => $data['item_description'] ?? null,
                 'date'             => $data['date'],
+                // No end date entered = the job ends on its start date.
+                'end_date'         => $data['end_date'] ?? $data['date'],
                 'customer_id'      => $data['customer_id'],
                 'remarks'          => $data['remarks'] ?? null,
             ];
@@ -250,12 +253,6 @@ class DailyJobController extends Controller
                     'labour_charges'              => $labour,
                     'yard_charges'                => $yard,
                     'kanta_charges'               => $kanta,
-                    'detention_first_day_charges' => $first,
-                    'detention_next_day_rate'     => $nextRate,
-                    'detention_extra_days'        => $extraDays,
-                    'detention_night_rate'        => $nightRate,
-                    'detention_total'             => $detentionTotal,
-                    'detention_date'              => $data['detention_date'] ?? null,
                     'extra_port_charges_total'    => $extraTotal,
                 ];
             } elseif ($job) {
@@ -271,12 +268,6 @@ class DailyJobController extends Controller
                     'labour_charges'              => $job->labour_charges,
                     'yard_charges'                => $job->yard_charges,
                     'kanta_charges'               => $job->kanta_charges,
-                    'detention_first_day_charges' => $job->detention_first_day_charges,
-                    'detention_next_day_rate'     => $job->detention_next_day_rate,
-                    'detention_extra_days'        => $job->detention_extra_days,
-                    'detention_night_rate'        => $job->detention_night_rate,
-                    'detention_total'             => $job->detention_total,
-                    'detention_date'              => $job->detention_date,
                     'extra_port_charges_total'    => $job->extra_port_charges_total,
                 ];
             } else {
@@ -290,12 +281,6 @@ class DailyJobController extends Controller
                     'labour_charges'              => 0,
                     'yard_charges'                => 0,
                     'kanta_charges'               => 0,
-                    'detention_first_day_charges' => 0,
-                    'detention_next_day_rate'     => 0,
-                    'detention_extra_days'        => 0,
-                    'detention_night_rate'        => 0,
-                    'detention_total'             => 0,
-                    'detention_date'              => null,
                     'extra_port_charges_total'    => 0,
                 ];
             }
@@ -315,6 +300,13 @@ class DailyJobController extends Controller
                     // Trip Plan no longer carries charges (item 2) — tax
                     // now applies to the job's grand total instead (item 13).
                     'trip_plan_total' => 0,
+                    // Old shared detention — unused on the current form.
+                    'detention_first_day_charges' => 0,
+                    'detention_next_day_rate'     => 0,
+                    'detention_extra_days'        => 0,
+                    'detention_night_rate'        => 0,
+                    'detention_total'             => 0,
+                    // rent / job_total are worked out below, once the
                     // rent / job_total are worked out below, once the
                     // vehicle rows (each with its own rent) are saved.
                     'rent'            => 0,
@@ -374,6 +366,14 @@ class DailyJobController extends Controller
                     'rent'                        => $canFillRates
                         ? round((float) ($vRow['rent'] ?? 0), 2)
                         : ($line ? (float) $line->rent : 0),
+                    // Detention per day on this vehicle (day + night charge);
+                    // multiplied by the job's detention days when totalled.
+                    'detention_day_charge'        => $canFillRates
+                        ? round((float) ($vRow['detention_day_charge'] ?? 0), 2)
+                        : ($line ? (float) $line->detention_day_charge : 0),
+                    'detention_night_charge'      => $canFillRates
+                        ? round((float) ($vRow['detention_night_charge'] ?? 0), 2)
+                        : ($line ? (float) $line->detention_night_charge : 0),
                     'labour_charges'              => 0,
                     'yard_charges'                => 0,
                     'kanta_charges'               => 0,
@@ -944,8 +944,9 @@ class DailyJobController extends Controller
                 <tr><td><b>Pickup Port</b></td><td>' . e($job->pickupPort->name ?? '—') . '</td>
                     <td><b>Destination</b></td><td>' . e($job->destinationLocation->location_name ?? '—') . '</td></tr>
                     ' . ($job->trip_type === 'two_way' ? '<tr><td><b>Dropoff Port</b></td><td colspan="3">' . e($job->dropoffPort->name ?? '—') . '</td></tr>' : '') . '
-                    ' . ($job->detention_date ? '<tr><td><b>Detention Date</b></td><td colspan="3">' . $job->detention_date->format('d-m-Y') . '</td></tr>' : '') . ' 
-                <tr><td colspan="4"><b>Item Description:</b> ' . e($job->item_description ?? '') . '</td></tr>
+                    ' . ($job->detention_days > 0
+                        ? '<tr><td><b>Detention</b></td><td colspan="3">' . $job->date->format('d-m-Y') . ' to ' . $job->end_date->format('d-m-Y') . ' (' . $job->detention_days . ' ' . ($job->detention_days === 1 ? 'day' : 'days') . ')</td></tr>'
+                        : ($job->detention_date ? '<tr><td><b>Detention Date</b></td><td colspan="3">' . $job->detention_date->format('d-m-Y') . '</td></tr>' : '')) . '                <tr><td colspan="4"><b>Item Description:</b> ' . e($job->item_description ?? '') . '</td></tr>
             </table>';
             $pdf->writeHTML($tripHtml, true, false, true, false, '');
             $pdf->Ln(2);

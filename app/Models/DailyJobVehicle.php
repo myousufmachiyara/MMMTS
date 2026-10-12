@@ -22,7 +22,9 @@ class DailyJobVehicle extends Model
         'destination_location_id',
         'dropoff_port_id',
         'rent',
-        'labour_charges',
+        'detention_day_charge',
+        'detention_night_charge',
+        'labour_charges',        'labour_charges',
         'yard_charges',
         'kanta_charges',
         'detention_first_day_charges',
@@ -41,6 +43,12 @@ class DailyJobVehicle extends Model
     protected $casts = [
         'is_legacy' => 'boolean',
     ];
+
+    // Detention for ONE day on this vehicle = day charge + night charge.
+    public function getDetentionPerDayAttribute(): float
+    {
+        return round((float) $this->detention_day_charge + (float) $this->detention_night_charge, 2);
+    }
 
     public function dailyJob()
     {
