@@ -14,6 +14,9 @@ class DailyJob extends Model
         'job_no',
         'job_type',
         'date',
+        // Direct jobs: last day of the job. Detention days = end_date - date
+        // (the first day is covered by each vehicle's Rent). Null on jobs saved
+        // before per-vehicle detention existed.
         'end_date',
         'vehicle_id',
         'customer_id',
@@ -333,10 +336,10 @@ class DailyJob extends Model
     // Item 3 (round 3) — every one of a Direct job's REAL vehicle-rows
     // (vehicle_id set — excludes any stray row without one) is billed as if
     // it independently made the same full trip, so the shared charges
-    // (labour, yard, kanta, detention, extra port) are multiplied by how many
-    // vehicles are on the job. Rent is the exception: it is entered per
-    // vehicle and can differ, so it is summed rather than multiplied (see
-    // direct_rent_total below).
+    // (labour, yard, kanta, extra port) are multiplied by how many vehicles
+    // are on the job. Rent and detention are the exceptions: they are entered
+    // per vehicle and can differ, so they are summed rather than multiplied
+    // (see direct_rent_total / direct_detention_total below).
     // A job with zero vehicle-rows (shouldn't normally happen — the form
     // requires at least one) is treated as ×1 rather than ×0, so it's never
     // silently billed as zero. Party-to-Party jobs work the same way but
@@ -398,6 +401,79 @@ class DailyJob extends Model
         }
 
         return round((float) $lines->sum(fn ($v) => (float) $v->rent), 2);
+    }
+
+    // ── Direct jobs: detention is charged per vehicle, per day ──────────────
+    //
+    // Number of DETENTION days = end date - start date. The first day is not
+    // counted: it is covered by each vehicle's Rent. A job with no end date
+    // (saved before this existed), or ending on its start date, has 0 days.
+    public function getDetentionDaysAttribute(): int
+    {
+        if (in_array($this->job_type, ['party_to_party', 'madqam'], true) || !$this->end_date || !$this->date) {
+            return 0;
+        }
+
+        $days = $this->date->copy()->startOfDay()->diffInDays($this->end_date->copy()->startOfDay(), false);
+
+        return max(0, (int) round($days));
+    }
+
+    // One vehicle's detention for the whole job: (day + night charge) x days.
+    public function lineDetention($line): float
+    {
+        return round((float) ($line->detention_per_day ?? 0) * $this->detention_days, 2);
+    }
+
+    // Detention of every vehicle on the job, summed.
+    public function getDirectDetentionTotalAttribute(): float
+    {
+        return round((float) $this->directLines()->sum(fn ($v) => $this->lineDetention($v)), 2);
+    }
+
+    // Labour + yard + kanta + extra-port charges — the shared charges
+    // entered once on the job, which apply to EACH vehicle. detention_total
+    // here is the OLD shared detention of a job saved before detention became
+    // per-vehicle (it is 0 on every job saved on the current form).
+    public function getDirectSharedPerVehicleAttribute(): float
+    {
+        return round(
+            (float) $this->labour_charges + (float) $this->yard_charges + (float) $this->kanta_charges
+            + (float) $this->detention_total + (float) $this->extra_port_charges_total,
+            2
+        );
+    }
+
+    // True when every vehicle on the job has the same rent.
+    public function getHasUniformRentAttribute(): bool
+    {
+        $rents = $this->directLines()->map(fn ($v) => round((float) $v->rent, 2))->unique();
+
+        return $rents->count() <= 1;
+    }
+
+    // True when every vehicle has the same detention too.
+    public function getHasUniformDetentionAttribute(): bool
+    {
+        $det = $this->directLines()->map(fn ($v) => $this->lineDetention($v))->unique();
+
+        return $det->count() <= 1;
+    }
+
+    // True when no per-vehicle figure (rent or detention) differs.
+    public function getHasUniformVehicleChargesAttribute(): bool
+    {
+        return $this->has_uniform_rent && $this->has_uniform_detention;
+    }
+
+    // What ONE vehicle costs the customer: its own rent + its own detention
+    // + the shared charges.
+    public function vehicleAmount($line): float
+    {
+        return round(
+            (float) ($line->rent ?? 0) + $this->lineDetention($line) + $this->direct_shared_per_vehicle,
+            2
+        );
     }
 
     // "Other charges" = everything except the Trip Plan portion. Trip Plan
@@ -472,79 +548,6 @@ class DailyJob extends Model
         // Old-style shared detention (x vehicles) + per-vehicle detention.
         return round(
             (float) $this->detention_total * $this->billableVehicleCount() + $this->direct_detention_total,
-            2
-        );    
-    }
-
-        // ── Direct jobs: detention is charged per vehicle, per day ──────────────
-    //
-    // Number of DETENTION days = end date - start date. The first day is not
-    // counted: it is covered by each vehicle's Rent. A job with no end date
-    // (saved before this existed), or ending on its start date, has 0 days.
-    public function getDetentionDaysAttribute(): int
-    {
-        if (in_array($this->job_type, ['party_to_party', 'madqam'], true) || !$this->end_date || !$this->date) {
-            return 0;
-        }
-
-        $days = $this->date->copy()->startOfDay()->diffInDays($this->end_date->copy()->startOfDay(), false);
-
-        return max(0, (int) round($days));
-    }
-
-    // One vehicle's detention for the whole job: (day + night charge) x days.
-    public function lineDetention($line): float
-    {
-        return round((float) ($line->detention_per_day ?? 0) * $this->detention_days, 2);
-    }
-
-    // Detention of every vehicle on the job, summed.
-    public function getDirectDetentionTotalAttribute(): float
-    {
-        return round((float) $this->directLines()->sum(fn ($v) => $this->lineDetention($v)), 2);
-    }
-
-    // Labour + yard + kanta + extra-port charges — the shared charges
-    // entered once on the job, which apply to EACH vehicle. detention_total
-    // here is the OLD shared detention of a job saved before detention became
-    // per-vehicle (it is 0 on every job saved on the current form).
-    public function getDirectSharedPerVehicleAttribute(): float
-    {
-        return round(
-            (float) $this->labour_charges + (float) $this->yard_charges + (float) $this->kanta_charges
-            + (float) $this->detention_total + (float) $this->extra_port_charges_total,
-            2
-        );
-    }
-
-    // True when every vehicle on the job has the same rent.
-    public function getHasUniformRentAttribute(): bool
-    {
-        $rents = $this->directLines()->map(fn ($v) => round((float) $v->rent, 2))->unique();
-
-        return $rents->count() <= 1;
-    }
-
-    // True when every vehicle has the same detention too.
-    public function getHasUniformDetentionAttribute(): bool
-    {
-        $det = $this->directLines()->map(fn ($v) => $this->lineDetention($v))->unique();
-
-        return $det->count() <= 1;
-    }
-
-    // True when no per-vehicle figure (rent or detention) differs.
-    public function getHasUniformVehicleChargesAttribute(): bool
-    {
-        return $this->has_uniform_rent && $this->has_uniform_detention;
-    }
-
-    // What ONE vehicle costs the customer: its own rent + its own detention
-    // + the shared charges.
-    public function vehicleAmount($line): float
-    {
-        return round(
-            (float) ($line->rent ?? 0) + $this->lineDetention($line) + $this->direct_shared_per_vehicle,
             2
         );
     }

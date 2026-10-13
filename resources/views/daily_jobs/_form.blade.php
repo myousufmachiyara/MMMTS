@@ -364,7 +364,11 @@ function recalcTotal() {
         tr.querySelector('.vehicle-total').value = fmt(vehicleTotal);
         if (sel && sel.value) vehiclesTotal += vehicleTotal;
     });
-    var legacyDetention = parseFloat(sharedSeed.legacy_detention) || 0;
+    // The old shared detention of a job saved before detention became
+    // per-vehicle: editable (admins) so it can be replaced by the per-vehicle
+    // detention; read from the saved value when there is no input (assistants).
+    var legacyEl = document.getElementById('legacy_detention');
+    var legacyDetention = legacyEl ? (parseFloat(legacyEl.value) || 0) : (parseFloat(sharedSeed.legacy_detention) || 0);
     var sharedPerVehicle = labour + yard + kanta + legacyDetention + extraPortTotal;
     var vCount = vehicleCount();
     var jobTotal = vehiclesTotal + sharedPerVehicle * vCount;
@@ -415,7 +419,10 @@ function renderRateFields() {
         '<div class="col-lg-4 mb-2"><label>Weight Bridge (Kanta)</label><input type="number" step="any" class="form-control" id="kanta" name="kanta_charges" value="' + (row.kanta_charges || 0) + '" oninput="recalcTotal()"></div>' +
     '</div>' +
     (row.legacy_detention > 0
-        ? '<div class="alert alert-info py-2">This job was saved with the old shared detention of <strong>' + fmt(row.legacy_detention) + '</strong> per vehicle. It is kept as is and still billed; detention for the Vehicles below is charged per day after the first.</div>'
+        ? '<div class="alert alert-warning py-2"><div class="row align-items-center">' +
+              '<div class="col-lg-8 mb-2">This job was saved with the <strong>old shared detention</strong> (one amount, billed once for every vehicle). Detention is now entered per vehicle in the Vehicles table below. Set this to <strong>0</strong> once you have entered the new per-vehicle detention, otherwise both are billed.</div>' +
+              '<div class="col-lg-4 mb-2"><label class="mb-0">Old detention per vehicle</label><input type="number" step="any" min="0" class="form-control" id="legacy_detention" name="legacy_detention" value="' + (row.legacy_detention || 0) + '" oninput="recalcTotal()"></div>' +
+          '</div></div>'
         : '') +
     '<div class="mb-2">' +
         '<div class="d-flex justify-content-between align-items-center">' +

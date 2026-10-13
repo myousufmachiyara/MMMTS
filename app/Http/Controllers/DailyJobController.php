@@ -100,6 +100,9 @@ class DailyJobController extends Controller
     {
         return [
             'date'        => 'required|date',
+            // Last day of the job. Detention days = end_date - date (the first
+            // day is covered by each vehicle's Rent). Optional: empty means
+            // the job ends on its start date, i.e. no detention days.
             'end_date'    => 'nullable|date|after_or_equal:date',
             'customer_id' => 'required|exists:chart_of_accounts,id',
             'remarks'     => 'nullable|string|max:1000',
@@ -108,7 +111,7 @@ class DailyJobController extends Controller
             // ── Trip & Charges — shared across every vehicle on the job.
             // Everything on a multi-vehicle Direct job is the same for
             // every vehicle EXCEPT the vehicle itself, its container
-            // number and its RENT (see vehicles.*.rent below), so the rest
+            // number, its RENT and its DETENTION rates (see vehicles.* below), so the rest
             // is entered once here instead of once per vehicle-row.
             // route_id/item_description stay BASIC fields
             // (assistant-fillable, item 11) exactly as they were when they
@@ -124,6 +127,12 @@ class DailyJobController extends Controller
             'labour_charges'              => 'nullable|numeric|min:0',
             'yard_charges'                => 'nullable|numeric|min:0',
             'kanta_charges'               => 'nullable|numeric|min:0',
+
+            // Only sent for a job saved before detention became per-vehicle: the
+            // old shared detention (one amount per vehicle). An admin can set it
+            // to 0 to replace it with the per-vehicle detention.
+            'legacy_detention'            => 'nullable|numeric|min:0',
+
             'extra_port'                  => 'nullable|array',
             'extra_port.*.port_id'        => 'nullable|exists:ports,id',
             'extra_port.*.charges'        => 'nullable|numeric|min:0',
@@ -219,12 +228,6 @@ class DailyJobController extends Controller
 
             if ($canFillRates) {
                 $tripType  = $data['trip_type'] ?? 'one_way';
-                $first     = (float) ($data['detention_first_day_charges'] ?? 0);
-                $nextRate  = (float) ($data['detention_next_day_rate'] ?? 0);
-                $extraDays = (int) ($data['detention_extra_days'] ?? 0);
-                $nightRate = (float) ($data['detention_night_rate'] ?? 0);
-                $detentionTotal = DailyJobVehicle::computeDetentionTotal($first, $nextRate, $extraDays, $nightRate);
-
                 $extraTotal = 0;
                 foreach (($data['extra_port'] ?? []) as $ep) {
                     if (empty($ep['port_id'])) {
@@ -253,8 +256,28 @@ class DailyJobController extends Controller
                     'labour_charges'              => $labour,
                     'yard_charges'                => $yard,
                     'kanta_charges'               => $kanta,
+                    // The job-level detention_* columns are NOT written any
+                    // more — detention lives on each vehicle row now. A job
+                    // saved before that change keeps its old shared
+                    // detention untouched (it still counts, see DailyJob).
                     'extra_port_charges_total'    => $extraTotal,
                 ];
+
+                // A job saved before detention became per-vehicle still carries
+                // its old shared detention. The form shows it as an editable
+                // amount; saving it as 0 removes it so only the per-vehicle
+                // detention is billed. (Left alone when the field isn't sent.)
+                if ($job && isset($data['legacy_detention'])) {
+                    $legacy = round((float) $data['legacy_detention'], 2);
+                    $rateFields['detention_total'] = $legacy;
+                    if ($legacy == 0.0) {
+                        $rateFields['detention_first_day_charges'] = 0;
+                        $rateFields['detention_next_day_rate']     = 0;
+                        $rateFields['detention_extra_days']        = 0;
+                        $rateFields['detention_night_rate']        = 0;
+                        $rateFields['detention_date']              = null;
+                    }
+                }
             } elseif ($job) {
                 // No fill_rates permission, editing an EXISTING job — never
                 // trust the client for gated fields, but also never blank
@@ -306,7 +329,6 @@ class DailyJobController extends Controller
                     'detention_extra_days'        => 0,
                     'detention_night_rate'        => 0,
                     'detention_total'             => 0,
-                    // rent / job_total are worked out below, once the
                     // rent / job_total are worked out below, once the
                     // vehicle rows (each with its own rent) are saved.
                     'rent'            => 0,
@@ -946,7 +968,8 @@ class DailyJobController extends Controller
                     ' . ($job->trip_type === 'two_way' ? '<tr><td><b>Dropoff Port</b></td><td colspan="3">' . e($job->dropoffPort->name ?? '—') . '</td></tr>' : '') . '
                     ' . ($job->detention_days > 0
                         ? '<tr><td><b>Detention</b></td><td colspan="3">' . $job->date->format('d-m-Y') . ' to ' . $job->end_date->format('d-m-Y') . ' (' . $job->detention_days . ' ' . ($job->detention_days === 1 ? 'day' : 'days') . ')</td></tr>'
-                        : ($job->detention_date ? '<tr><td><b>Detention Date</b></td><td colspan="3">' . $job->detention_date->format('d-m-Y') . '</td></tr>' : '')) . '                <tr><td colspan="4"><b>Item Description:</b> ' . e($job->item_description ?? '') . '</td></tr>
+                        : ($job->detention_date ? '<tr><td><b>Detention Date</b></td><td colspan="3">' . $job->detention_date->format('d-m-Y') . '</td></tr>' : '')) . '
+                <tr><td colspan="4"><b>Item Description:</b> ' . e($job->item_description ?? '') . '</td></tr>
             </table>';
             $pdf->writeHTML($tripHtml, true, false, true, false, '');
             $pdf->Ln(2);

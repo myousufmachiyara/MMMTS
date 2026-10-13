@@ -22,9 +22,11 @@ class DailyJobVehicle extends Model
         'destination_location_id',
         'dropoff_port_id',
         'rent',
+        // Detention is charged per vehicle, per day, for every day after the
+        // first (the first day is the Rent). See DailyJob::lineDetention().
         'detention_day_charge',
         'detention_night_charge',
-        'labour_charges',        'labour_charges',
+        'labour_charges',
         'yard_charges',
         'kanta_charges',
         'detention_first_day_charges',
