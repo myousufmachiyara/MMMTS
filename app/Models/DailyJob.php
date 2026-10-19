@@ -14,9 +14,10 @@ class DailyJob extends Model
         'job_no',
         'job_type',
         'date',
-        // Direct jobs: last day of the job. Detention days = end_date - date
-        // (the first day is covered by each vehicle's Rent). Null on jobs saved
-        // before per-vehicle detention existed.
+        // Direct jobs: last day of the job. Information only — detention days
+        // and nights are entered per vehicle (daily_job_vehicles.detention_days /
+        // detention_nights), they are not worked out from the dates. Null on jobs
+        // saved before this field existed.
         'end_date',
         'vehicle_id',
         'customer_id',
@@ -403,32 +404,48 @@ class DailyJob extends Model
         return round((float) $lines->sum(fn ($v) => (float) $v->rent), 2);
     }
 
-    // ── Direct jobs: detention is charged per vehicle, per day ──────────────
+    // ── Direct jobs: detention is entered per vehicle ───────────────────────
     //
-    // Number of DETENTION days = end date - start date. The first day is not
-    // counted: it is covered by each vehicle's Rent. A job with no end date
-    // (saved before this existed), or ending on its start date, has 0 days.
-    public function getDetentionDaysAttribute(): int
-    {
-        if (in_array($this->job_type, ['party_to_party', 'madqam'], true) || !$this->end_date || !$this->date) {
-            return 0;
-        }
+    // Each vehicle carries its own day rate x number of days + night rate x
+    // number of nights (see DailyJobVehicle::detention_amount). The first day
+    // is the vehicle's Rent. The job's start/end dates are information only —
+    // they do not drive any amount.
 
-        $days = $this->date->copy()->startOfDay()->diffInDays($this->end_date->copy()->startOfDay(), false);
-
-        return max(0, (int) round($days));
-    }
-
-    // One vehicle's detention for the whole job: (day + night charge) x days.
+    // One vehicle's detention for the whole job.
     public function lineDetention($line): float
     {
-        return round((float) ($line->detention_per_day ?? 0) * $this->detention_days, 2);
+        return round((float) ($line->detention_amount ?? 0), 2);
     }
 
     // Detention of every vehicle on the job, summed.
     public function getDirectDetentionTotalAttribute(): float
     {
         return round((float) $this->directLines()->sum(fn ($v) => $this->lineDetention($v)), 2);
+    }
+
+    // True when every vehicle has the same day rate, days, night rate and
+    // nights — i.e. one line of working describes them all on a print.
+    public function getHasIdenticalDetentionTermsAttribute(): bool
+    {
+        $terms = $this->directLines()->map(fn ($v) => implode('|', [
+            round((float) $v->detention_day_charge, 2), (int) $v->detention_days,
+            round((float) $v->detention_night_charge, 2), (int) $v->detention_nights,
+        ]))->unique();
+
+        return $terms->count() <= 1;
+    }
+
+    // "2 days + 1 night" when every vehicle has the same detention; '' when
+    // there is none, or when the vehicles differ.
+    public function getDetentionSummaryAttribute(): string
+    {
+        if (!$this->has_identical_detention_terms) {
+            return '';
+        }
+
+        $first = $this->directLines()->first();
+
+        return $first ? $first->detention_label : '';
     }
 
     // Labour + yard + kanta + extra-port charges — the shared charges

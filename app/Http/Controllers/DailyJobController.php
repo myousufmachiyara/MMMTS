@@ -100,9 +100,9 @@ class DailyJobController extends Controller
     {
         return [
             'date'        => 'required|date',
-            // Last day of the job. Detention days = end_date - date (the first
-            // day is covered by each vehicle's Rent). Optional: empty means
-            // the job ends on its start date, i.e. no detention days.
+            // Last day of the job. Information only: detention days and nights
+            // are entered per vehicle, they are not worked out from the dates.
+            // Optional: empty means the job ends on its start date.
             'end_date'    => 'nullable|date|after_or_equal:date',
             'customer_id' => 'required|exists:chart_of_accounts,id',
             'remarks'     => 'nullable|string|max:1000',
@@ -148,10 +148,12 @@ class DailyJobController extends Controller
             // Rent is the one charge that can differ from vehicle to vehicle
             // (admin-only like every other rate — ignored without fill_rates).
             'vehicles.*.rent'             => 'nullable|numeric|min:0',
-            // Detention is per vehicle, per day, charged for every day after
-            // the first (see end_date above). Admin-only like rent.
+            // Detention is per vehicle: day rate x number of days + night rate
+            // x number of nights. Admin-only like rent.
             'vehicles.*.detention_day_charge'   => 'nullable|numeric|min:0',
+            'vehicles.*.detention_days'         => 'nullable|integer|min:0|max:3650',
             'vehicles.*.detention_night_charge' => 'nullable|numeric|min:0',
+            'vehicles.*.detention_nights'       => 'nullable|integer|min:0|max:3650',
         ];
     }
 
@@ -388,14 +390,21 @@ class DailyJobController extends Controller
                     'rent'                        => $canFillRates
                         ? round((float) ($vRow['rent'] ?? 0), 2)
                         : ($line ? (float) $line->rent : 0),
-                    // Detention per day on this vehicle (day + night charge);
-                    // multiplied by the job's detention days when totalled.
+                    // Detention on this vehicle: day rate x days + night rate x
+                    // nights. Without fill_rates the row keeps what an admin
+                    // already gave it (0 for a brand-new row).
                     'detention_day_charge'        => $canFillRates
                         ? round((float) ($vRow['detention_day_charge'] ?? 0), 2)
                         : ($line ? (float) $line->detention_day_charge : 0),
+                    'detention_days'              => $canFillRates
+                        ? max(0, (int) ($vRow['detention_days'] ?? 0))
+                        : ($line ? (int) $line->detention_days : 0),
                     'detention_night_charge'      => $canFillRates
                         ? round((float) ($vRow['detention_night_charge'] ?? 0), 2)
                         : ($line ? (float) $line->detention_night_charge : 0),
+                    'detention_nights'            => $canFillRates
+                        ? max(0, (int) ($vRow['detention_nights'] ?? 0))
+                        : ($line ? (int) $line->detention_nights : 0),
                     'labour_charges'              => 0,
                     'yard_charges'                => 0,
                     'kanta_charges'               => 0,
@@ -966,9 +975,10 @@ class DailyJobController extends Controller
                 <tr><td><b>Pickup Port</b></td><td>' . e($job->pickupPort->name ?? '—') . '</td>
                     <td><b>Destination</b></td><td>' . e($job->destinationLocation->location_name ?? '—') . '</td></tr>
                     ' . ($job->trip_type === 'two_way' ? '<tr><td><b>Dropoff Port</b></td><td colspan="3">' . e($job->dropoffPort->name ?? '—') . '</td></tr>' : '') . '
-                    ' . ($job->detention_days > 0
-                        ? '<tr><td><b>Detention</b></td><td colspan="3">' . $job->date->format('d-m-Y') . ' to ' . $job->end_date->format('d-m-Y') . ' (' . $job->detention_days . ' ' . ($job->detention_days === 1 ? 'day' : 'days') . ')</td></tr>'
-                        : ($job->detention_date ? '<tr><td><b>Detention Date</b></td><td colspan="3">' . $job->detention_date->format('d-m-Y') . '</td></tr>' : '')) . '
+                    ' . (($job->end_date && $job->end_date->ne($job->date))
+                        ? '<tr><td><b>Job Period</b></td><td colspan="3">' . $job->date->format('d-m-Y') . ' to ' . $job->end_date->format('d-m-Y') . '</td></tr>'
+                        : '') . '
+                    ' . ($job->detention_date ? '<tr><td><b>Detention Date</b></td><td colspan="3">' . $job->detention_date->format('d-m-Y') . '</td></tr>' : '') . '
                 <tr><td colspan="4"><b>Item Description:</b> ' . e($job->item_description ?? '') . '</td></tr>
             </table>';
             $pdf->writeHTML($tripHtml, true, false, true, false, '');
@@ -988,16 +998,21 @@ class DailyJobController extends Controller
             $pdf->SetFont('helvetica', 'B', 10);
             $pdf->Cell(0, 6, 'Vehicles (' . $job->vehicles->count() . ')', 0, 1, 'L');
 
+            // Detention days / nights are entered per vehicle, so they sit in the
+            // vehicle's own row (only when some vehicle actually has detention).
+            $hasDet = $job->vehicles->contains(fn ($l) => (int) $l->detention_days > 0 || (int) $l->detention_nights > 0);
             $vehHtml = '<table border="0.3" cellpadding="4" cellspacing="0" width="100%" style="font-size:10px;">
                 <tr style="background-color:#f5f5f5;font-weight:bold;">
-                    <th width="8%">#</th><th width="37%">Vehicle</th><th width="30%">Container #</th><th width="25%">DC #</th>
+                    <th width="' . ($hasDet ? 6 : 8) . '%">#</th><th width="' . ($hasDet ? 26 : 37) . '%">Vehicle</th><th width="' . ($hasDet ? 22 : 30) . '%">Container #</th><th width="' . ($hasDet ? 20 : 25) . '%">DC #</th>'
+                . ($hasDet ? '<th width="12%">Det. Days</th><th width="14%">Det. Nights</th>' : '') . '
                 </tr>';
             foreach ($job->vehicles as $i => $line) {
                 $vehHtml .= '<tr>
                     <td>' . ($i + 1) . '</td>
                     <td>' . e($line->vehicle->name ?? '') . '</td>
                     <td>' . e($line->container_no ?? '—') . '</td>
-                    <td>' . e($line->deliveryChallan->dc_no ?? '—') . '</td>
+                    <td>' . e($line->deliveryChallan->dc_no ?? '—') . '</td>'
+                    . ($hasDet ? '<td>' . (int) $line->detention_days . '</td><td>' . (int) $line->detention_nights . '</td>' : '') . '
                 </tr>';
             }
             $vehHtml .= '</table>';

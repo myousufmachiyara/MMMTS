@@ -22,10 +22,13 @@ class DailyJobVehicle extends Model
         'destination_location_id',
         'dropoff_port_id',
         'rent',
-        // Detention is charged per vehicle, per day, for every day after the
-        // first (the first day is the Rent). See DailyJob::lineDetention().
+        // Detention is entered per vehicle: day rate x number of days + night
+        // rate x number of nights (the first day is the Rent). See
+        // detention_amount below and DailyJob::lineDetention().
         'detention_day_charge',
+        'detention_days',
         'detention_night_charge',
+        'detention_nights',
         'labour_charges',
         'yard_charges',
         'kanta_charges',
@@ -44,12 +47,37 @@ class DailyJobVehicle extends Model
 
     protected $casts = [
         'is_legacy' => 'boolean',
+        'detention_days' => 'integer',
+        'detention_nights' => 'integer',
     ];
 
-    // Detention for ONE day on this vehicle = day charge + night charge.
-    public function getDetentionPerDayAttribute(): float
+    // This vehicle's detention:
+    //   (day rate x number of days) + (night rate x number of nights)
+    public function getDetentionAmountAttribute(): float
     {
-        return round((float) $this->detention_day_charge + (float) $this->detention_night_charge, 2);
+        return round(
+            (float) $this->detention_day_charge * (int) $this->detention_days
+            + (float) $this->detention_night_charge * (int) $this->detention_nights,
+            2
+        );
+    }
+
+    // "2 days + 1 night" — what the prints show next to a vehicle's detention.
+    // Empty when the vehicle has no detention days or nights.
+    public function getDetentionLabelAttribute(): string
+    {
+        $parts = [];
+        $days = (int) $this->detention_days;
+        $nights = (int) $this->detention_nights;
+
+        if ($days > 0) {
+            $parts[] = $days . ($days === 1 ? ' day' : ' days');
+        }
+        if ($nights > 0) {
+            $parts[] = $nights . ($nights === 1 ? ' night' : ' nights');
+        }
+
+        return implode(' + ', $parts);
     }
 
     public function dailyJob()

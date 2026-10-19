@@ -416,13 +416,13 @@ class BillController extends Controller
         foreach ($bill->jobs as $i => $job) {
             $isPty = $job->job_type === 'party_to_party';
             $isMq  = $job->job_type === 'madqam';
-            // Detention note under the amount: the number of detention days on
-            // a job saved on the current form, or the single date an older job
-            // was saved with.
+            // Detention note under the amount: the detention days / nights (when
+            // every vehicle has the same), or the single date an older job was
+            // saved with.
             $detDateNote = '';
-            if (!$isPty && !$isMq && $job->detention_days > 0) {
-                $detDateNote = '<br><span style="font-size:7px;color:#555555;">' . $job->detention_days . ' ' . ($job->detention_days === 1 ? 'day' : 'days') . '</span>';
-            } elseif (!$isPty && $job->detention_date) {
+            if (!$isPty && !$isMq && $job->detention_summary !== '') {
+                $detDateNote = '<br><span style="font-size:7px;color:#555555;">' . e($job->detention_summary) . '</span>';
+            } elseif (!$isPty && !$isMq && $job->detention_date && (float) $job->detention_total != 0.0) {
                 $detDateNote = '<br><span style="font-size:7px;color:#555555;">on ' . $job->detention_date->format('d-m-Y') . '</span>';
             }
             // Item 3 (round 3) — a Direct job's shared charges are entered once
@@ -578,15 +578,16 @@ class BillController extends Controller
             $portRowsHtml .= '<tr style="color:#444444;font-size:9px;"><td width="80%" align="left">&nbsp;&nbsp;&nbsp;- ' . e($name) . '</td><td width="20%">' . number_format($amt, 2) . '</td></tr>';
         }
 
-        // Detention is per vehicle, per day, for every day after the first (the
-        // first day is the Rent). This row SUMS each vehicle's own detention,
-        // plus the old shared detention (x vehicles) of a job saved before
-        // that. The label carries each job's detention period; the note under
-        // it spells out the working, like the Rent row above.
+        // Detention is entered per vehicle: day rate x days + night rate x nights
+        // (the first day is the Rent). This row SUMS each vehicle's own
+        // detention, plus the old shared detention (x vehicles) of a job saved
+        // before that. The note under it spells out the working, like the Rent
+        // row above.
         $detTotal  = 0;
         $detSingle = 0; // single-vehicle old-style jobs' share, so the notes still add up
         $detNotes  = [];
         $detPeriods = [];
+        $fmtN = fn ($n) => number_format($n, 2);
         foreach ($bill->jobs as $job) {
             if ($isPtyJob($job) || $job->job_type === 'madqam') {
                 continue;
@@ -597,27 +598,38 @@ class BillController extends Controller
             $newTotal  = $job->direct_detention_total;
             $detTotal += $legacyPer * $vc + $newTotal;
 
-            if ($job->detention_days > 0) {
-                $detPeriods[] = $tag . $job->date->format('d-m-Y') . ' to ' . $job->end_date->format('d-m-Y')
-                    . ' (' . $job->detention_days . ' ' . ($job->detention_days === 1 ? 'day' : 'days') . ')';
-            } elseif ($job->detention_date) {
+            if ($legacyPer != 0.0 && $job->detention_date) {
                 $detPeriods[] = $tag . $job->detention_date->format('d-m-Y');
             }
 
             $parts = [];
             if ($legacyPer != 0.0 && $vc > 1) {
-                $parts[] = number_format($legacyPer, 2) . ' per vehicle × ' . $vc . ' vehicles';
+                $parts[] = $fmtN($legacyPer) . ' per vehicle × ' . $vc . ' vehicles';
             } elseif ($legacyPer != 0.0) {
                 $detSingle += $legacyPer;
             }
             if ($newTotal != 0.0) {
-                if ($vc > 1 && !$job->has_uniform_detention) {
-                    $parts[] = $job->vehicles->filter(fn ($v) => $v->vehicle_id)
-                        ->map(fn ($v) => e($v->vehicle->name ?? '') . ' ' . number_format($job->lineDetention($v), 2))
+                $lines = $job->vehicles->filter(fn ($v) => $v->vehicle_id && $job->lineDetention($v) != 0.0);
+                if ($vc > 1 && !$job->has_identical_detention_terms) {
+                    // Vehicles differ: one entry each, with its days / nights.
+                    $parts[] = $lines
+                        ->map(fn ($v) => e($v->vehicle->name ?? '') . ' ' . $fmtN($job->lineDetention($v)) . ' (' . $v->detention_label . ')')
                         ->implode(', ');
                 } else {
-                    $parts[] = number_format($newTotal / $vc / $job->detention_days, 2) . ' per day × ' . $job->detention_days
-                        . ' days' . ($vc > 1 ? ' × ' . $vc . ' vehicles' : '');
+                    // Same terms on every vehicle: day rate × days + night rate × nights.
+                    $v = $lines->first();
+                    $calc = [];
+                    if ((int) $v->detention_days > 0 && (float) $v->detention_day_charge != 0.0) {
+                        $calc[] = $fmtN($v->detention_day_charge) . ' × ' . $v->detention_days . ($v->detention_days == 1 ? ' day' : ' days');
+                    }
+                    if ((int) $v->detention_nights > 0 && (float) $v->detention_night_charge != 0.0) {
+                        $calc[] = $fmtN($v->detention_night_charge) . ' × ' . $v->detention_nights . ($v->detention_nights == 1 ? ' night' : ' nights');
+                    }
+                    $working = implode(' + ', $calc);
+                    if ($vc > 1) {
+                        $working = (count($calc) > 1 ? '(' . $working . ')' : $working) . ' × ' . $vc . ' vehicles';
+                    }
+                    $parts[] = $working;
                 }
             }
             if ($parts) {
