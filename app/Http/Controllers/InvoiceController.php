@@ -372,14 +372,6 @@ class InvoiceController extends Controller
             <tr>
                 <td colspan="4" align="right">Sales Tax (' . rtrim(rtrim(number_format($invoice->tax_percent, 2), '0'), '.') . '% on Grand Total of ' . number_format($grandTotalBeforeTax, 2) . ')</td>
                 <td align="right">' . number_format($invoice->tax_amount, 2) . '</td>
-            </tr>
-            <tr>
-                <td colspan="4" align="right">Less: Company-Absorbed Portion (' . (100 - (float) ($invoice->customer_tax_share_percent ?? 20)) . '% of Sales Tax)</td>
-                <td align="right">(' . number_format($invoice->company_tax_amount, 2) . ')</td>
-            </tr>
-            <tr>
-                <td colspan="4" align="right">Net Sales Tax Payable by Customer (' . $customerSharePct . '%)</td>
-                <td align="right">' . number_format($invoice->customer_tax_amount, 2) . '</td>
             </tr>';
         }
 
