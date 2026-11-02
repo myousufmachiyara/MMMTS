@@ -406,7 +406,7 @@ class BillController extends Controller
                 <th width="6%">S.No</th>
                 <th width="14%">Job No.</th>
                 <th width="12%">Date</th>
-                <th width="17%">Vehicle / Vendor</th>
+                <th width="17%">Unit</th>
                 <th width="17%">Route / Destination</th>
                 <th width="12%">Detention Charges</th>
                 <th width="11%">Other Charges</th>
