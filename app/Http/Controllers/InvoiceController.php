@@ -390,13 +390,17 @@ class InvoiceController extends Controller
 
         // Item 14 — explicit tax-inclusive/exclusive statement on print.
         $pdf->SetFont('helvetica', 'I', 8);
+        $pdf->SetFont('helvetica', 'I', 8);
         $taxStatement = $invoice->is_taxable
-            // Item 2 (round 3) — make the split explicit on print, not just
-            // the net figure, since the customer is only being charged part
-            // of the calculated tax.
-            ? ('Amounts above are exclusive of Sales Tax; Sales Tax of ' . rtrim(rtrim(number_format($invoice->tax_percent, 2), '0'), '.') . '% has been calculated and split per agreement — ' . rtrim(rtrim(number_format($invoice->customer_tax_share_percent ?? 20, 2), '0'), '.') . '% payable by the customer (added above) and the remainder absorbed by the company.')
+            ? ('Amounts above are exclusive of Sales Tax; Sales Tax of '
+                . rtrim(rtrim(number_format($invoice->tax_percent, 2), '0'), '.')
+                . '% has been calculated and split per agreement — '
+                . rtrim(rtrim(number_format($invoice->customer_tax_share_percent ?? 20, 2), '0'), '.')
+                . '% payable by the customer (added above) and the remainder absorbed by the company.')
             : 'This invoice does not include Sales Tax.';
-        $pdf->Cell(0, 5, $taxStatement, 0, 1, 'L');
+
+        // MultiCell wraps long text; Cell() just overflows past the page edge.
+        $pdf->MultiCell(0, 4, $taxStatement, 0, 'L', false, 1);
         $pdf->SetFont('helvetica', '', 10);
         $pdf->Ln(2);
 
