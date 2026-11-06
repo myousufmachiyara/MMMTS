@@ -132,7 +132,7 @@ class InvoiceController extends Controller
                 $customerTaxSharePct = $isTaxable ? (float) ($data['customer_tax_share_percent'] ?? 20) : null;
                 $customerTaxAmount = $isTaxable ? round($taxAmount * $customerTaxSharePct / 100, 2) : 0;
                 $companyTaxAmount  = $isTaxable ? round($taxAmount - $customerTaxAmount, 2) : 0;
-                $total     = round($billsSubtotal + $customerTaxAmount, 2);
+                $total = round($billsSubtotal + $taxAmount, 2);
                 // One vehicle = one container (see Bill::getContainerCountAttribute()).
                 $totalContainers = (int) $bills->sum(fn ($bill) => $bill->container_count);
 
@@ -358,7 +358,7 @@ class InvoiceController extends Controller
         // the full tax_amount — see InvoiceController::store(). This is the
         // ONE "Subtotal (Bills)" row; the older row based on
         // total_amount - tax_amount was wrong once the tax is split.
-        $grandTotalBeforeTax = $invoice->total_amount - $invoice->customer_tax_amount;
+        $grandTotalBeforeTax = round($invoice->bills->sum('total_amount'), 2);
 
         $html .= '
             <tr style="background-color:#f5f5f5;">
@@ -390,16 +390,12 @@ class InvoiceController extends Controller
 
         // Item 14 — explicit tax-inclusive/exclusive statement on print.
         $pdf->SetFont('helvetica', 'I', 8);
-        $pdf->SetFont('helvetica', 'I', 8);
         $taxStatement = $invoice->is_taxable
             ? ('Amounts above are exclusive of Sales Tax; Sales Tax of '
                 . rtrim(rtrim(number_format($invoice->tax_percent, 2), '0'), '.')
-                . '% has been calculated and split per agreement — '
-                . rtrim(rtrim(number_format($invoice->customer_tax_share_percent ?? 20, 2), '0'), '.')
-                . '% payable by the customer (added above) and the remainder absorbed by the company.')
+                . '% has been calculated on the grand total and is included in the Total Payable Amount.')
             : 'This invoice does not include Sales Tax.';
 
-        // MultiCell wraps long text; Cell() just overflows past the page edge.
         $pdf->MultiCell(0, 4, $taxStatement, 0, 'L', false, 1);
         $pdf->SetFont('helvetica', '', 10);
         $pdf->Ln(2);
