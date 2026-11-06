@@ -96,6 +96,11 @@
                     <span class="badge {{ $badge[$row->status] ?? 'bg-secondary' }}">{{ ucfirst($row->status) }}</span>
                   </td>
                   <td class="actions">
+                    @can('invoices.edit')
+                      <a class="text-primary me-1" href="{{ route('invoices.edit', $row->id) }}" title="Edit">
+                          <i class="fas fa-edit"></i>
+                      </a>
+                    @endcan
                     <a class="text-success me-1" href="{{ route('invoices.print', $row->id) }}" target="_blank" title="Print">
                         <i class="fas fa-print"></i>
                     </a>

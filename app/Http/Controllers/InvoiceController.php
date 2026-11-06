@@ -37,6 +37,123 @@ class InvoiceController extends Controller
         $customers = ChartOfAccounts::customers()->orderBy('name')->get();
         return view('invoices.create', compact('customers'));
     }
+    public function edit($id)
+{
+    $invoice = Invoice::with(['customer', 'bills'])->findOrFail($id);
+
+    return view('invoices.edit', compact('invoice'));
+}
+
+public function update(Request $request, $id)
+{
+    try {
+        $data = $request->validate([
+            'invoice_date'  => 'required|date',
+            'from_date'     => 'required|date',
+            'to_date'       => 'required|date|after_or_equal:from_date',
+            'bill_ids'      => 'required|array|min:1',
+            'bill_ids.*'    => 'exists:bills,id',
+            'is_taxable'    => 'nullable|boolean',
+            'tax_percent'   => 'nullable|required_if:is_taxable,1|numeric|min:0|max:100',
+            'customer_tax_share_percent' => 'nullable|numeric|min:0|max:100',
+            'remarks'       => 'nullable|string|max:1000',
+        ]);
+
+        $invoice = DB::transaction(function () use ($data, $id) {
+            $invoice = Invoice::whereKey($id)->lockForUpdate()->firstOrFail();
+
+            // Customer cannot change on edit. Bills must be unbilled or already on this invoice.
+            $bills = Bill::where('customer_id', $invoice->customer_id)
+                ->where(function ($q) use ($invoice) {
+                    $q->whereNull('invoice_id')->orWhere('invoice_id', $invoice->id);
+                })
+                ->whereIn('id', $data['bill_ids'])
+                ->with(['jobs.vehicles', 'jobs.ptyVehicles'])
+                ->lockForUpdate()
+                ->get();
+
+            if ($bills->isEmpty()) {
+                throw new \RuntimeException('Selected bills are not available for this invoice.');
+            }
+
+            // Same calculation as store(): the total carries 100% of the tax.
+            $isTaxable           = (bool) ($data['is_taxable'] ?? false);
+            $taxPct              = $isTaxable ? (float) $data['tax_percent'] : 0;
+            $tripPlanSubtotal    = round($bills->sum('trip_plan_subtotal'), 2);
+            $billsSubtotal       = round($bills->sum('total_amount'), 2);
+            $taxAmount           = $isTaxable ? round($billsSubtotal * $taxPct / 100, 2) : 0;
+            $customerTaxSharePct = $isTaxable ? (float) ($data['customer_tax_share_percent'] ?? 20) : null;
+            $customerTaxAmount   = $isTaxable ? round($taxAmount * $customerTaxSharePct / 100, 2) : 0;
+            $companyTaxAmount    = $isTaxable ? round($taxAmount - $customerTaxAmount, 2) : 0;
+            $total               = round($billsSubtotal + $taxAmount, 2);
+            $totalContainers     = (int) $bills->sum(fn ($bill) => $bill->container_count);
+
+            // Keep the ledger voucher (Dr Customer / Cr Sales Tax Payable) in sync.
+            // It holds only the customer's share, as before.
+            $voucher = $invoice->voucher_id ? Voucher::find($invoice->voucher_id) : null;
+            if ($customerTaxAmount > 0) {
+                $taxAccountId = $this->taxPayableAccountId();
+                if ($taxAccountId) {
+                    $voucherData = [
+                        'voucher_type' => 'journal',
+                        'date'         => $data['invoice_date'],
+                        'ac_dr_sid'    => $invoice->customer_id,
+                        'ac_cr_sid'    => $taxAccountId,
+                        'amount'       => $customerTaxAmount,
+                        'reference'    => $invoice->invoice_no,
+                        'remarks'      => "Sales tax (customer's share) on Invoice {$invoice->invoice_no}",
+                    ];
+                    if ($voucher) {
+                        $voucher->update($voucherData);
+                    } else {
+                        $voucher = Voucher::create($voucherData);
+                    }
+                }
+            } elseif ($voucher) {
+                // Invoice is no longer taxable (or share is 0): remove the voucher.
+                $voucher->delete();
+                $voucher = null;
+            }
+
+            // Release bills that were removed, attach the selected ones.
+            Bill::where('invoice_id', $invoice->id)
+                ->whereNotIn('id', $bills->pluck('id'))
+                ->update(['invoice_id' => null]);
+            Bill::whereIn('id', $bills->pluck('id'))->update(['invoice_id' => $invoice->id]);
+
+            // Status from payments already recorded: pending / partial / cleared.
+            $paid   = (float) $invoice->paid_amount;
+            $status = $paid <= 0 ? 'pending' : ($paid >= $total ? 'cleared' : 'partial');
+
+            $invoice->update([
+                'invoice_date'                => $data['invoice_date'],
+                'from_date'                   => $data['from_date'],
+                'to_date'                     => $data['to_date'],
+                'is_taxable'                  => $isTaxable,
+                'tax_percent'                 => $isTaxable ? $taxPct : null,
+                'customer_tax_share_percent'  => $customerTaxSharePct,
+                'trip_plan_subtotal'          => $tripPlanSubtotal,
+                'tax_amount'                  => $taxAmount,
+                'customer_tax_amount'         => $customerTaxAmount,
+                'company_tax_amount'          => $companyTaxAmount,
+                'total_containers'            => $totalContainers,
+                'total_amount'                => $total,
+                'status'                      => $status,
+                'voucher_id'                  => $voucher->id ?? null,
+                'remarks'                     => $data['remarks'] ?? null,
+                'updated_by'                  => auth()->id(),
+            ]);
+
+            return $invoice;
+        });
+
+        return redirect()->route('invoices.index')->with('success', "Invoice {$invoice->invoice_no} updated successfully.");
+
+    } catch (\Throwable $e) {
+        Log::error('[Invoice] Update error', ['message' => $e->getMessage(), 'trace' => $e->getTraceAsString()]);
+        return redirect()->back()->withInput()->with('error', 'Something went wrong: ' . $e->getMessage());
+    }
+}
 
     // AJAX: non-invoiced bills for a customer within a bill-date range
     public function getBills(Request $request)
@@ -45,25 +162,32 @@ class InvoiceController extends Controller
             'customer_id' => 'required|exists:chart_of_accounts,id',
             'from_date'   => 'required|date',
             'to_date'     => 'required|date|after_or_equal:from_date',
+            'invoice_id'  => 'nullable|integer',
         ]);
 
         $bills = Bill::where('customer_id', $request->customer_id)
-            ->whereNull('invoice_id')
-            ->whereBetween('bill_date', [$request->from_date, $request->to_date])
-            // jobs.vehicles / jobs.ptyVehicles so container_count (vehicles,
-            // not job rows) is computed from loaded data — see
-            // Bill::getContainerCountAttribute().
+            ->where(function ($q) use ($request) {
+                // Unbilled bills inside the date range...
+                $q->where(function ($q2) use ($request) {
+                    $q2->whereNull('invoice_id')
+                    ->whereBetween('bill_date', [$request->from_date, $request->to_date]);
+                });
+                // ...plus every bill already on this invoice (any date).
+                if ($request->filled('invoice_id')) {
+                    $q->orWhere('invoice_id', $request->invoice_id);
+                }
+            })
             ->with(['jobs.vehicles', 'jobs.ptyVehicles'])
             ->orderBy('bill_date')
             ->get(['id', 'bill_no', 'bill_date', 'trip_plan_subtotal', 'other_charges_subtotal', 'total_amount'])
             ->map(function ($bill) {
                 return [
-                    'id'                  => $bill->id,
-                    'bill_no'             => $bill->bill_no,
-                    'bill_date'           => $bill->bill_date->format('Y-m-d'),
-                    'trip_plan_subtotal'  => (float) $bill->trip_plan_subtotal,
-                    'total_amount'        => (float) $bill->total_amount,
-                    'container_count'     => $bill->container_count,
+                    'id'                 => $bill->id,
+                    'bill_no'            => $bill->bill_no,
+                    'bill_date'          => $bill->bill_date->format('Y-m-d'),
+                    'trip_plan_subtotal' => (float) $bill->trip_plan_subtotal,
+                    'total_amount'       => (float) $bill->total_amount,
+                    'container_count'    => $bill->container_count,
                 ];
             });
 

@@ -211,7 +211,7 @@ function recalcTotal() {
     var taxAmount = isTaxable ? (billsSum * taxPct / 100) : 0;
     var customerTaxAmount = isTaxable ? (taxAmount * customerSharePct / 100) : 0;
     var companyTaxAmount = isTaxable ? (taxAmount - customerTaxAmount) : 0;
-    var total = billsSum + customerTaxAmount;
+    var total = billsSum + taxAmount;
 
     document.getElementById('sumBills').textContent = fmt(billsSum);
     document.getElementById('sumTax').textContent = fmt(taxAmount);
@@ -220,8 +220,8 @@ function recalcTotal() {
     document.getElementById('sumTotal').textContent = fmt(total);
     document.getElementById('sumContainers').textContent = containers;
     document.getElementById('taxNote').textContent = isTaxable
-        ? ('Sales Tax of ' + (taxPct || 0) + '% is calculated on the grand total above; only ' + customerSharePct + '% of it (' + fmt(customerTaxAmount) + ') is billed to the customer, the rest is absorbed by the company.')
-        : 'This invoice will not include Sales Tax.';
+    ? ('Sales Tax of ' + (taxPct || 0) + '% is calculated on the grand total and included in full in the Total Invoice Amount. The ledger posts only the customer\'s ' + customerSharePct + '% share (' + fmt(customerTaxAmount) + ').')
+    : 'This invoice will not include Sales Tax.';
 }
 
 document.getElementById('invoiceForm').addEventListener('submit', function(e) {
