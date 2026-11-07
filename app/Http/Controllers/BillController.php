@@ -52,16 +52,27 @@ class BillController extends Controller
             'customer_id' => 'required|exists:chart_of_accounts,id',
             'from_date'   => 'required|date',
             'to_date'     => 'required|date|after_or_equal:from_date',
+            'bill_id'     => 'nullable|integer',
         ]);
+
         $jobs = DailyJob::with(['vehicles.vehicle', 'ptyVehicles', 'madqamLines.vehicle', 'route', 'vendor'])
             ->where('customer_id', $request->customer_id)
-            ->whereNull('bill_id')
+            ->where(function ($q) use ($request) {
+                // Non-billed jobs inside the date range...
+                $q->where(function ($q2) use ($request) {
+                    $q2->whereNull('bill_id')
+                    ->whereBetween('date', [$request->from_date, $request->to_date]);
+                });
+                // ...plus every job already on this bill (any date), when editing.
+                if ($request->filled('bill_id')) {
+                    $q->orWhere('bill_id', $request->bill_id);
+                }
+            })
             // An 'incomplete' Direct job (item 11 — assistant hasn't had its
             // rates filled in by an admin yet) has no real charges to bill.
             ->where(function ($q) {
                 $q->where('job_type', 'party_to_party')->orWhere('status', 'complete');
             })
-            ->whereBetween('date', [$request->from_date, $request->to_date])
             ->orderBy('date')
             ->get()
             ->map(function ($job) {
