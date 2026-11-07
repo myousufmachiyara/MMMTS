@@ -89,6 +89,17 @@
                           <i class="fas fa-print"></i>
                       </a>
                     @endcan
+                    @can('bills.edit')
+                      @if($row->invoice_id)
+                        <span class="text-muted me-1" title="On an invoice — remove it from the invoice first to edit">
+                            <i class="fas fa-edit"></i>
+                        </span>
+                      @else
+                        <a class="text-primary me-1" href="{{ route('bills.edit', $row->id) }}" title="Edit">
+                            <i class="fas fa-edit"></i>
+                        </a>
+                      @endif
+                    @endcan
                     @can('bills.delete')
                       @php
                           $confirmMsg = $row->invoice_id

@@ -258,6 +258,142 @@ class BillController extends Controller
         return response()->json($bill);
     }
 
+    public function edit($id)
+{
+    $bill = Bill::with(['customer', 'jobs'])->findOrFail($id);
+
+    if ($bill->invoice_id) {
+        return redirect()->route('bills.index')->with('error',
+            "Bill {$bill->bill_no} is already on an invoice. Edit that invoice, untick this bill, then edit the bill.");
+    }
+
+    $companies = OurCompany::where('is_active', true)->orderBy('name')->get();
+
+    return view('bills.edit', compact('bill', 'companies'));
+}
+
+public function update(Request $request, $id)
+{
+    try {
+        // Customer is fixed on edit, so it is not validated here.
+        $rules = $this->rules();
+        unset($rules['customer_id']);
+        $data = $request->validate($rules);
+
+        $warnings = [];
+
+        $bill = DB::transaction(function () use ($data, $id, &$warnings) {
+            $bill = Bill::whereKey($id)->lockForUpdate()->firstOrFail();
+
+            if ($bill->invoice_id) {
+                throw new \RuntimeException("Bill {$bill->bill_no} is already on an invoice. Edit the invoice and untick this bill first.");
+            }
+
+            // Jobs must be this customer's and either unbilled or already on this bill.
+            $jobs = DailyJob::with(['vehicles', 'ptyVehicles'])
+                ->where('customer_id', $bill->customer_id)
+                ->where(function ($q) use ($bill) {
+                    $q->whereNull('bill_id')->orWhere('bill_id', $bill->id);
+                })
+                ->where(function ($q) {
+                    $q->where('job_type', 'party_to_party')->orWhere('status', 'complete');
+                })
+                ->whereIn('id', $data['job_ids'])
+                ->lockForUpdate()
+                ->get();
+
+            if ($jobs->isEmpty()) {
+                throw new \RuntimeException('Selected jobs are not available for this bill.');
+            }
+
+            $tripPlanSubtotal         = round($jobs->sum('trip_plan_total'), 2);
+            $detentionChargesSubtotal = round($jobs->sum('detention_charges_total'), 2);
+            $otherChargesSubtotal     = round($jobs->sum('other_charges_total'), 2);
+            $total                    = round($tripPlanSubtotal + $otherChargesSubtotal, 2);
+
+            // 1) Customer receivable voucher: Dr Customer / Cr Sales Revenue.
+            $voucher = $bill->voucher_id ? Voucher::find($bill->voucher_id) : null;
+            $revenueAccountId = $this->revenueAccountId();
+            if ($revenueAccountId) {
+                $voucherData = [
+                    'voucher_type' => 'journal',
+                    'date'         => $data['bill_date'],
+                    'ac_dr_sid'    => $bill->customer_id,
+                    'ac_cr_sid'    => $revenueAccountId,
+                    'amount'       => $total,
+                    'reference'    => $bill->bill_no,
+                    'remarks'      => "Bill {$bill->bill_no}",
+                ];
+                if ($voucher) {
+                    $voucher->update($voucherData);
+                } else {
+                    $voucher = Voucher::create($voucherData);
+                }
+            } else {
+                $warnings[] = 'No customer receivable voucher was posted — no Sales Revenue account (code 401001 / type "revenue") exists in the chart of accounts.';
+            }
+
+            // 2) Vendor-payable vouchers: reverse every old one, then re-post
+            //    for the selected Party-to-Party jobs (their costs may have changed).
+            $oldPtyVoucherIds = DailyJob::where('bill_id', $bill->id)->whereNotNull('pty_voucher_id')->pluck('pty_voucher_id');
+            if ($oldPtyVoucherIds->isNotEmpty()) {
+                Voucher::whereIn('id', $oldPtyVoucherIds)->delete();
+            }
+            DailyJob::where('bill_id', $bill->id)->update(['bill_id' => null, 'pty_voucher_id' => null]);
+
+            // 3) Attach the selected jobs.
+            DailyJob::whereIn('id', $jobs->pluck('id'))->update(['bill_id' => $bill->id]);
+
+            $ptyJobs = $jobs->filter(fn ($j) => $j->job_type === 'party_to_party' && $j->vendor_id && (float) $j->pty_total_cost > 0);
+            if ($ptyJobs->isNotEmpty()) {
+                $costAccountId = $this->ptyCostAccountId();
+                if (!$costAccountId) {
+                    $warnings[] = 'No vendor payable vouchers were posted for the Party-to-Party jobs — no cost/expense account exists in the chart of accounts.';
+                } else {
+                    foreach ($ptyJobs as $job) {
+                        $ptyVoucher = Voucher::create([
+                            'voucher_type' => 'journal',
+                            'date'         => $data['bill_date'],
+                            'ac_dr_sid'    => $costAccountId,
+                            'ac_cr_sid'    => $job->vendor_id,
+                            'amount'       => $job->pty_total_cost,
+                            'reference'    => $bill->bill_no,
+                            'remarks'      => "Vendor payable — Job {$job->job_no} ({$job->billableVehicleCount()} vehicle(s)) — Bill {$bill->bill_no}",
+                        ]);
+                        DailyJob::whereKey($job->id)->update(['pty_voucher_id' => $ptyVoucher->id]);
+                    }
+                }
+            }
+
+            $bill->update([
+                'company_id'                 => $data['company_id'],
+                'from_date'                  => $data['from_date'],
+                'to_date'                    => $data['to_date'],
+                'bill_date'                  => $data['bill_date'],
+                'trip_plan_subtotal'         => $tripPlanSubtotal,
+                'other_charges_subtotal'     => $otherChargesSubtotal,
+                'detention_charges_subtotal' => $detentionChargesSubtotal,
+                'total_amount'               => $total,
+                'voucher_id'                 => $voucher->id ?? null,
+                'remarks'                    => $data['remarks'] ?? null,
+                'updated_by'                 => auth()->id(),
+            ]);
+
+            return $bill;
+        });
+
+        $redirect = redirect()->route('bills.index')->with('success', "Bill {$bill->bill_no} updated successfully.");
+        if ($warnings) {
+            $redirect->with('error', 'Heads up: ' . implode(' ', $warnings));
+        }
+
+        return $redirect;
+
+    } catch (\Throwable $e) {
+        Log::error('[Bill] Update error', ['message' => $e->getMessage(), 'trace' => $e->getTraceAsString()]);
+        return redirect()->back()->withInput()->with('error', 'Something went wrong: ' . $e->getMessage());
+    }
+}
     // Deleting a bill is a full "undo" — if it was already invoiced (and that
     // invoice already had payments recorded), all of that gets cascaded and
     // reversed rather than blocked, so a mistake can always be corrected:
