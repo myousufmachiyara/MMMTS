@@ -678,7 +678,7 @@ document.getElementById('job_date').addEventListener('input', function() { syncJ
 document.getElementById('job_end_date').addEventListener('change', function() { syncJobDates(false); });
 document.getElementById('job_end_date').addEventListener('input', function() { syncJobDates(false); });
 
-document.getElementById('customer_id').addEventListener('change', function() {
+$('#customer_id').on('change', function() {
     if (canFillRates) {
         filterDestinationOptions(this.value, null);
     }
