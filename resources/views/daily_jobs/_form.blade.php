@@ -302,11 +302,24 @@ function toggleTripType() {
 function filterDestinationOptions(customerId, selectedId) {
     var $sel = $('#destination_location_id');
     if (!$sel.length) return;
+
     $sel.empty().append('<option value="">Select Customer Location</option>');
-    customerLocations.filter(function(l) { return l.customer_id == customerId; }).forEach(function(l) {
-        $sel.append('<option value="' + l.id + '"' + (selectedId == l.id ? ' selected' : '') + '>' + l.location_name + '</option>');
-    });
-    $sel.trigger('change');
+    customerLocations
+        .filter(function(l) { return String(l.customer_id) === String(customerId); })
+        .forEach(function(l) {
+            $sel.append($('<option>', {
+                value: l.id,
+                text: l.location_name,
+                selected: selectedId && String(selectedId) === String(l.id)
+            }));
+        });
+
+    // Tell Select2 to redraw from the new options.
+    if ($sel.hasClass('select2-hidden-accessible')) {
+        $sel.trigger('change.select2');
+    } else {
+        $sel.trigger('change');
+    }
 }
 
 // Item 3 (round 3) follow-up — mirrors DailyJob::billableVehicleCount() on
@@ -678,11 +691,13 @@ document.getElementById('job_date').addEventListener('input', function() { syncJ
 document.getElementById('job_end_date').addEventListener('change', function() { syncJobDates(false); });
 document.getElementById('job_end_date').addEventListener('input', function() { syncJobDates(false); });
 
-$('#customer_id').on('change', function() {
+$(document).on('change select2:select select2:clear', '#customer_id', function () {
+    var customerId = $(this).val();
+
     if (canFillRates) {
-        filterDestinationOptions(this.value, null);
+        filterDestinationOptions(customerId, null);
     }
-    document.querySelectorAll('#vehicleRows > tr').forEach(function(tr) {
+    document.querySelectorAll('#vehicleRows > tr').forEach(function (tr) {
         var vi = tr.id.replace('vehicleRow_', '');
         $('#dc_select_' + vi).data('dcSel', '').data('dcLabel', null);
         refreshDcDropdown(vi, null, null);
