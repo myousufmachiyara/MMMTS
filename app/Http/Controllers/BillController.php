@@ -471,6 +471,7 @@ public function update(Request $request, $id)
         $bill = Bill::with([
             'customer', 'company', 'creator','jobs.vehicles.vehicle', 'jobs.vehicles.deliveryChallan', 'jobs.ptyVehicles', 'jobs.route',
             'jobs.vendor','jobs.sharedExtraPortCharges.port','jobs.madqamLines.vehicle',
+            'jobs.destinationLocation',
         ])->findOrFail($id);
 
         $pdf = new \TCPDF();
@@ -597,16 +598,42 @@ public function update(Request $request, $id)
             $detNote = ($multi && !$isPty && !$isMq && !$job->has_uniform_detention)
                 ? '<br><span style="font-size:7px;color:#555555;">avg per vehicle</span>'
                 : $perNote;
+            $vehicleNames = $job->vehicles->pluck('vehicle.name')->filter()->implode(', ');
+            $unitText = $isPty
+                ? ($job->vendor->name ?? '—')
+                : ($isMq
+                    ? ($job->madqam_vehicle_list ?: '—')
+                    : ($job->destinationLocation->location_name ?? ($vehicleNames ?: '—')));
             $html .= '<tr>
                 <td>' . ($i + 1) . '</td>
                 <td>' . e($job->job_no) . '</td>
                 <td>' . $job->date->format('d-m-Y') . '</td>
-                <td>' . e($isPty ? ($job->vendor->name ?? '—') : ($isMq ? ($job->madqam_vehicle_list ?: '—') : ($job->vehicles->pluck('vehicle.name')->filter()->implode(', ') ?: '—'))) . '</td>
+                <td>' . e($unitText) . '</td>
                 <td>' . e($isPty ? ($job->pty_destination ?? '—') : ($isMq ? 'Muqadum' : ($job->route->name ?? ($job->vehicles->pluck('route.name')->filter()->implode(', ') ?: '—')))) . '</td>
                 <td align="right">' . number_format($detentionPerVehicle, 2) . $detDateNote . $detNote . '</td>
                 <td align="right">' . number_format($job->other_charges_per_vehicle, 2) . $otherNote . '</td>
                 <td align="right">' . number_format($job->bill_amount, 2) . $totalNote . '</td>
             </tr>';
+        }
+
+        // Tax comes from the invoice this bill is on (if any, and if taxable).
+        $taxInvoice    = $bill->invoice_id ? Invoice::find($bill->invoice_id) : null;
+        $billTaxPct    = ($taxInvoice && $taxInvoice->is_taxable) ? (float) $taxInvoice->tax_percent : 0;
+        $billTaxAmount = round((float) $bill->total_amount * $billTaxPct / 100, 2);
+        $billPayable   = round((float) $bill->total_amount + $billTaxAmount, 2);
+        $billTaxPctTxt = rtrim(rtrim(number_format($billTaxPct, 2), '0'), '.');
+
+        $taxRowsHtml = '';
+        if ($billTaxPct > 0) {
+            $taxRowsHtml = '
+                <tr>
+                    <td colspan="5" align="right">Sales Tax (' . $billTaxPctTxt . '% on ' . number_format($bill->total_amount, 2) . ')</td>
+                    <td colspan="3" align="right">' . number_format($billTaxAmount, 2) . '</td>
+                </tr>
+                <tr style="background-color:#f5f5f5;">
+                    <td colspan="5" align="right"><b>Total Payable (incl. Sales Tax)</b></td>
+                    <td colspan="3" align="right"><b>' . number_format($billPayable, 2) . '</b></td>
+                </tr>';
         }
 
         $html .= '
@@ -621,7 +648,8 @@ public function update(Request $request, $id)
             <tr style="background-color:#f5f5f5;">
                 <td colspan="5" align="right"><b>Total Bill Amount (Grand Total)</b></td>
                 <td colspan="3" align="right"><b>' . number_format($bill->total_amount, 2) . '</b></td>
-            </tr>
+            </tr>'
+            . $taxRowsHtml . '
             <tr>
                 <td colspan="5" align="right">Total Containers</td>
                 <td colspan="3" align="right">' . $bill->container_count . '</td>
@@ -907,14 +935,14 @@ public function update(Request $request, $id)
         $pdf->writeHTML($vehHtml, true, false, true, false, '');
         $pdf->Ln(3);
 
-        // Item 14 — make explicit that Sales Tax, when applicable, is a
-        // separate line added at the Invoice stage on top of this bill's
-        // grand total, not included in the figure above.
         $pdf->SetFont('helvetica', 'I', 8);
-        $pdf->Cell(0, 5, 'Note: amounts above do not include Sales Tax. Tax, where applicable, is calculated on the invoiced grand total and shown on the Invoice.', 0, 1, 'L');
+        $billNote = $billTaxPct > 0
+            ? 'Sales Tax of ' . $billTaxPctTxt . '% is calculated on this bill\'s grand total as per Invoice ' . $taxInvoice->invoice_no . '.'
+            : 'Note: amounts above do not include Sales Tax. Tax, where applicable, is calculated on the invoiced grand total and shown on the Invoice.';
+        $pdf->MultiCell(0, 4, $billNote, 0, 'L', false, 1);
         $pdf->SetFont('helvetica', '', 10);
         $pdf->Ln(2);
-
+        
         if (!empty($bill->remarks)) {
             $pdf->writeHTML('<b>Remarks:</b><br><span style="font-size:12px;">' . nl2br(e($bill->remarks)) . '</span>', true, false, true, false, '');
         }
