@@ -703,7 +703,30 @@ $(document).on('change select2:select select2:clear', '#customer_id', function (
         refreshDcDropdown(vi, null, null);
     });
 });
+// Fallback: watch the Customer value directly, so the Destination list
+// doesn't depend on Select2's change event reaching this page's jQuery.
+var lastCustomerSeen = null;
+setInterval(function () {
+    if (!canFillRates) return;
+    if (!document.getElementById('destination_location_id')) return; // not rendered yet
 
+    var cid = $('#customer_id').val() || '';
+    if (cid === lastCustomerSeen) return;
+
+    var firstRun = (lastCustomerSeen === null);
+    lastCustomerSeen = cid;
+
+    // On an edit page's first pass, keep the job's saved destination selected.
+    filterDestinationOptions(cid, firstRun ? sharedSeed.destination_location_id : null);
+
+    if (!firstRun) {
+        document.querySelectorAll('#vehicleRows > tr').forEach(function (tr) {
+            var vi = tr.id.replace('vehicleRow_', '');
+            $('#dc_select_' + vi).data('dcSel', '').data('dcLabel', null);
+            refreshDcDropdown(vi, null, null);
+        });
+    }
+}, 300);
 $(document).ready(function() {
     // Route select — a plain, single, always-visible select2 populated the
     // same way as the (now removed) per-vehicle one used to be.
