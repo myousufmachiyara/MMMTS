@@ -14,9 +14,6 @@ use Maatwebsite\Excel\Facades\Excel;
 
 class FleetReportController extends Controller
 {
-    // ─────────────────────────────────────────────────────────────
-    // MAIN ENTRY POINT — mirrors AccountsReportController's tab pattern.
-    // ─────────────────────────────────────────────────────────────
     public function index(Request $request)
     {
         $from = $request->from_date ?? Carbon::now()->startOfMonth()->toDateString();
@@ -33,23 +30,13 @@ class FleetReportController extends Controller
             'vendor_wise'     => $this->vendorWise($from, $to),
             'route_wise'      => $this->routeWise($from, $to),
             'customer_routes' => $this->customerRoutes($from, $to),
-            // Item 15
             'company_share'   => $this->companyShare($from, $to),
             'vehicle_pl'      => $this->vehiclePL($from, $to),
-            // Per-vehicle ledger (optionally narrowed to one vehicle)
             'vehicle_ledger'  => $this->vehicleLedger($from, $to, $request->vehicle_id),
         ];
 
         return view('reports.fleet_reports', compact('reports', 'from', 'to', 'vehicles', 'customers', 'vendors', 'routes'));
     }
-
-    // ─────────────────────────────────────────────────────────────
-    // ITEM 12 — PDF & Excel export
-    //
-    // Same pattern as AccountsReportController's export — exports exactly
-    // one tab (?report=<key>), rebuilt with the same ?from_date/?to_date
-    // filters already applied on screen.
-    // ─────────────────────────────────────────────────────────────
 
     private function reportHeaders(): array
     {
@@ -59,7 +46,6 @@ class FleetReportController extends Controller
             'vendor_wise'     => ['Vendor', 'Jobs', 'Vendor Cost', 'Sale to Customer', 'Profit', 'Advance Paid', 'Guarantee Held', 'Balance Payable'],
             'route_wise'      => ['Route', 'Trips', 'Distinct Vehicles', 'Distinct Customers', 'Total Amount'],
             'customer_routes' => ['Customer', 'Route', 'Trips', 'Total Amount'],
-            // Item 15
             'company_share'   => ['Company', 'Revenue', '% of Total'],
             'vehicle_pl'      => ['Vehicle', 'Vehicle No.', 'Trips', 'Revenue', 'Cost', 'Profit'],
             'vehicle_ledger'  => ['Vehicle', 'Date', 'Job No.', 'Customer', 'Route', 'Container #', 'DC #', 'Bill #', 'Amount', 'Running Total'],
@@ -95,11 +81,6 @@ class FleetReportController extends Controller
         };
     }
 
-    // Each report here is an associative array (unlike AccountsReport's
-    // plain numeric-indexed rows), so it needs an explicit key->column
-    // mapping per report rather than a generic slice. customer_routes is
-    // nested (one group per customer, each holding its own routes[]) —
-    // it flattens to one export row per (customer, route) pair.
     private function flattenRows(string $key, $data): array
     {
         return match ($key) {
@@ -132,7 +113,6 @@ class FleetReportController extends Controller
                 $r['vehicle'], $r['vehicle_no'], $r['trip_count'], number_format($r['revenue'], 2),
                 $r['cost'] ?? 'N/A', $r['profit'] ?? 'N/A',
             ])->all(),
-            // One row per trip, then a Total row closing each vehicle's block.
             'vehicle_ledger' => collect($data)->flatMap(function ($block) {
                 $rows = collect($block['lines'])->map(fn ($l) => [
                     $block['vehicle'] . ' (' . $block['vehicle_no'] . ')', $l['date'], $l['job_no'], $l['customer'], $l['route'],
@@ -187,7 +167,6 @@ class FleetReportController extends Controller
     {
         $export = $this->prepareExport($request);
 
-        // Vehicle Ledger has a long Bill # column — give it proper widths instead of equal ones.
         $widths = $request->get('report') === 'vehicle_ledger' ? [12, 9, 8, 13, 13, 8, 6, 13, 9, 9] : null;
 
         $pdfContent = $this->renderReportPdf($export['label'], $export['from'], $export['to'], $export['headers'], $export['rows'], $widths);
@@ -200,9 +179,6 @@ class FleetReportController extends Controller
         ]);
     }
 
-    // Same shared-style PDF table renderer as AccountsReportController's —
-    // duplicated rather than extracted into a shared base/trait, matching
-    // how this app already duplicates its PDF boilerplate per controller.
     private function renderReportPdf(string $label, string $from, string $to, array $headers, array $rows, ?array $widths = null): string
     {
         $pdf = new \TCPDF('L', 'mm', 'A4');
@@ -226,7 +202,7 @@ class FleetReportController extends Controller
         $html = '<table border="0.3" cellpadding="4" cellspacing="0" width="100%" style="font-size:9px;">
             <tr style="background-color:#f5f5f5;font-weight:bold;">';
         foreach ($headers as $hi => $h) {
-            $w = $widths[$hi] ?? $colWidth; // optional per-report column widths (%), else equal
+            $w = $widths[$hi] ?? $colWidth;
             $html .= '<th width="' . $w . '%">' . e($h) . '</th>';
         }
         $html .= '</tr>';
@@ -251,26 +227,44 @@ class FleetReportController extends Controller
     }
 
     // ── Vehicle Ledger ──
-    //
-    // One block per vehicle (or just the one picked in the filter): every trip
-    // it ran in the period, oldest first, with a running total. A trip's amount
-    // is that vehicle's own rent plus the job's shared charges — the same
-    // per-vehicle convention as vehicleWise() (each vehicle on a job is billed
-    // as if it made the whole trip). Only Direct jobs have one of OUR
-    // vehicles; a Party-to-Party job runs on the vendor's vehicle, so it isn't
-    // part of any vehicle ledger.
-    // No expense side: nothing in the system (vouchers included) is tied to a
-    // vehicle, so there is no cost data to put against it.
+    // Direct jobs (vehicle's own rent + shared charges) and Muqadum jobs
+    // (each line's (rent + guarantee + kanta) x days). Party-to-Party runs on
+    // the vendor's vehicle, so it is not part of any vehicle ledger.
     private function vehicleLedger($from, $to, $vehicleId = null)
     {
         $lines = collect();
 
         $this->jobsInRange($from, $to)
             ->with(['vehicles.deliveryChallan', 'bill'])
-            ->where('job_type', 'direct')
+            ->whereIn('job_type', ['direct', 'madqam'])
             ->orderBy('date')->orderBy('id')
             ->get()
             ->each(function ($job) use (&$lines, $vehicleId) {
+                if ($job->job_type === 'madqam') {
+                    foreach ($job->madqamLines as $ml) {
+                        if (!$ml->vehicle_id) {
+                            continue;
+                        }
+                        if ($vehicleId && (int) $ml->vehicle_id !== (int) $vehicleId) {
+                            continue;
+                        }
+                        $lines->push([
+                            'vehicle_id'   => $ml->vehicle_id,
+                            'vehicle'      => $ml->vehicle->name ?? '—',
+                            'vehicle_no'   => $ml->vehicle->vehicle_no ?? '—',
+                            'date'         => ($ml->start_date ?? $job->date)->format('d-m-Y'),
+                            'job_no'       => $job->job_no,
+                            'customer'     => $job->customer->name ?? '—',
+                            'route'        => $ml->destination ?: 'Muqadum',
+                            'container_no' => '—',
+                            'dc_no'        => '—',
+                            'bill_no'      => $job->bill->bill_no ?? 'Unbilled',
+                            'amount'       => $ml->line_total,
+                        ]);
+                    }
+                    return;
+                }
+
                 foreach ($job->vehicles as $line) {
                     if (!$line->vehicle_id) {
                         continue;
@@ -300,7 +294,7 @@ class FleetReportController extends Controller
                 $first   = $group->first();
                 $running = 0;
                 $rows    = $group->map(function ($l) use (&$running) {
-                    $running   = round($running + $l['amount'], 2);
+                    $running      = round($running + $l['amount'], 2);
                     $l['running'] = $running;
                     return $l;
                 })->values()->all();
@@ -319,49 +313,46 @@ class FleetReportController extends Controller
 
     private function jobsInRange($from, $to)
     {
-        // FIX — daily_jobs.vehicle_id is a legacy, pre-multi-vehicle column
-        // that current jobs never populate (a job's real vehicle(s) live on
-        // its daily_job_vehicles rows instead — see DailyJob::vehicles()).
-        // Eager-load the real vehicles.vehicle chain so every report below
-        // can read a job's actual vehicle(s). Also eager-loads each
-        // vehicle's companies (item 15's companyShare() needs this).
-        return DailyJob::with(['vehicles.vehicle.companies', 'ptyVehicles', 'customer', 'vendor', 'route'])
+        return DailyJob::with([
+                'vehicles.vehicle.companies', 'ptyVehicles', 'madqamLines.vehicle.companies',
+                'customer', 'vendor', 'route',
+            ])
             ->whereBetween('date', [$from, $to]);
     }
 
-    // ── Vehicle Wise: trips run + revenue per vehicle (Direct jobs only — party-to-party has no our-vehicle) ──
-    //
-    // FIX — grouping used to be by daily_jobs.vehicle_id, which is always
-    // null for any job created since the multi-vehicle rewrite, so this
-    // report showed nothing for current data. Now built from each job's
-    // real vehicle-rows (job->vehicles) instead. A job's rent/labour/yard/
-    // detention/etc. charges are shared once across the whole job (not
-    // tracked per vehicle) — item 3 (round 3) changed what that means for
-    // billing purposes: each vehicle on the job is billed as if it made the
-    // same full trip on its own (see DailyJob::getOtherChargesTotalAttribute()),
-    // so each vehicle's own share is its OWN rent (rent can differ per
-    // vehicle) plus the job's shared charges, undivided — see
-    // DailyJob::vehicleAmount().
+    // ── Vehicle Wise: trips + revenue per vehicle (Direct and Muqadum) ──
     private function vehicleWise($from, $to)
     {
         $lines = collect();
 
         $this->jobsInRange($from, $to)
-            ->where('job_type', 'direct')
+            ->whereIn('job_type', ['direct', 'madqam'])
             ->get()
             ->each(function ($job) use (&$lines) {
-                $vehicleLines = $job->vehicles->filter(fn ($l) => $l->vehicle_id);
-                if ($vehicleLines->isEmpty()) {
+                if ($job->job_type === 'madqam') {
+                    foreach ($job->madqamLines as $ml) {
+                        if (!$ml->vehicle_id) {
+                            continue;
+                        }
+                        $lines->push([
+                            'vehicle_id' => $ml->vehicle_id,
+                            'vehicle'    => $ml->vehicle->name ?? '—',
+                            'vehicle_no' => $ml->vehicle->vehicle_no ?? '—',
+                            'route'      => null, // Muqadum destinations are free text, not route masters
+                            'amount'     => $ml->line_total,
+                        ]);
+                    }
                     return;
                 }
+
+                $vehicleLines = $job->vehicles->filter(fn ($l) => $l->vehicle_id);
                 foreach ($vehicleLines as $line) {
-                    $share = $job->vehicleAmount($line);
                     $lines->push([
                         'vehicle_id' => $line->vehicle_id,
                         'vehicle'    => $line->vehicle->name ?? '—',
                         'vehicle_no' => $line->vehicle->vehicle_no ?? '—',
                         'route'      => $job->route->name ?? null,
-                        'amount'     => $share,
+                        'amount'     => $job->vehicleAmount($line),
                     ]);
                 }
             });
@@ -382,61 +373,52 @@ class FleetReportController extends Controller
             ->values();
     }
 
-    // Distinct vehicle_ids actually used across a set of Direct jobs (reads
-    // each job's real vehicles() rows — see vehicleWise()'s fix note above).
+    // Distinct vehicle_ids used across a set of jobs (Direct rows + Muqadum lines).
     private function distinctVehicleCount($jobs)
     {
-        return $jobs->where('job_type', 'direct')
-            ->flatMap(fn ($job) => $job->vehicles->pluck('vehicle_id'))
-            ->filter()
-            ->unique()
-            ->count();
+        $direct = $jobs->where('job_type', 'direct')
+            ->flatMap(fn ($job) => $job->vehicles->pluck('vehicle_id'));
+        $muqadum = $jobs->where('job_type', 'madqam')
+            ->flatMap(fn ($job) => $job->madqamLines->pluck('vehicle_id'));
+
+        return $direct->merge($muqadum)->filter()->unique()->count();
     }
 
-    // ── Item 15a — Company Wise % Share ──
-    //
-    // "Our Companies" (see OurCompany/company_vehicle) aren't billing
-    // parties — they're the umbrella entities a vehicle operates under. A
-    // vehicle can be linked to more than one company (plain many-to-many,
-    // no stored ownership percentage anywhere). Per-VEHICLE, this uses the
-    // same undivided-share convention as vehicleWise() (each vehicle is
-    // billed as if it made the same full trip on its own, so its share of the
-    // job is its own rent plus the shared charges — DailyJob::vehicleAmount());
-    // when a vehicle itself is linked to more than one
-    // company, THAT vehicle's own share is still split evenly across its
-    // companies (no stored per-company ownership % exists to split by
-    // instead). A vehicle linked to no company falls into an "Unassigned"
-    // bucket rather than being silently dropped, so the percentages below
-    // always add up to 100%.
+    // ── Company Wise % Share (Direct and Muqadum) ──
     private function companyShare($from, $to)
     {
-        $amounts = collect(); // company_id (or 'unassigned') => running total
-        $names   = collect(); // company_id (or 'unassigned') => display name
+        $amounts = collect();
+        $names   = collect();
+
+        $add = function ($vehicle, float $share) use (&$amounts, &$names) {
+            $companies = $vehicle?->companies ?? collect();
+            $cCount    = $companies->count();
+
+            if ($cCount === 0) {
+                $amounts['unassigned'] = ($amounts['unassigned'] ?? 0) + $share;
+                $names['unassigned']   = 'Unassigned (no company linked)';
+                return;
+            }
+            foreach ($companies as $company) {
+                $amounts[$company->id] = ($amounts[$company->id] ?? 0) + $share / $cCount;
+                $names[$company->id]   = $company->name;
+            }
+        };
 
         $this->jobsInRange($from, $to)
-            ->where('job_type', 'direct')
+            ->whereIn('job_type', ['direct', 'madqam'])
             ->get()
-            ->each(function ($job) use (&$amounts, &$names) {
-                $vehicleLines = $job->vehicles->filter(fn ($l) => $l->vehicle_id);
-                if ($vehicleLines->isEmpty()) {
+            ->each(function ($job) use ($add) {
+                if ($job->job_type === 'madqam') {
+                    foreach ($job->madqamLines as $ml) {
+                        if ($ml->vehicle_id) {
+                            $add($ml->vehicle, (float) $ml->line_total);
+                        }
+                    }
                     return;
                 }
-                foreach ($vehicleLines as $line) {
-                    $vehicleShare = $job->vehicleAmount($line);
-                    $companies = $line->vehicle?->companies ?? collect();
-                    $cCount    = $companies->count();
-
-                    if ($cCount === 0) {
-                        $amounts['unassigned'] = ($amounts['unassigned'] ?? 0) + $vehicleShare;
-                        $names['unassigned']   = 'Unassigned (no company linked)';
-                        continue;
-                    }
-
-                    $perCompany = $vehicleShare / $cCount;
-                    foreach ($companies as $company) {
-                        $amounts[$company->id] = ($amounts[$company->id] ?? 0) + $perCompany;
-                        $names[$company->id]   = $company->name;
-                    }
+                foreach ($job->vehicles->filter(fn ($l) => $l->vehicle_id) as $line) {
+                    $add($line->vehicle, (float) $job->vehicleAmount($line));
                 }
             });
 
@@ -454,16 +436,7 @@ class FleetReportController extends Controller
             ->values();
     }
 
-    // ── Item 15b — Vehicle P&L (revenue only) ──
-    //
-    // A genuine profit & loss needs a cost side, but nothing in this app
-    // tracks vehicle-level costs today (no fuel, driver wage, or
-    // maintenance records exist anywhere in the schema). Rather than
-    // silently treating cost as 0 (which would make "profit" == revenue and
-    // mislead), cost/profit are left null here and rendered as "N/A" — this
-    // reuses vehicleWise()'s revenue-per-vehicle figures under P&L-shaped
-    // column names so it's ready to gain a real cost column the moment
-    // vehicle cost tracking exists.
+    // ── Vehicle P&L (revenue only — no vehicle cost data exists yet) ──
     private function vehiclePL($from, $to)
     {
         return $this->vehicleWise($from, $to)->map(function ($row) {
@@ -478,7 +451,7 @@ class FleetReportController extends Controller
         })->values();
     }
 
-    // ── Customer Wise: vehicles used + jobs + billed amount per customer (all job types) ──
+    // ── Customer Wise (all job types) ──
     private function customerWise($from, $to)
     {
         return $this->jobsInRange($from, $to)
@@ -489,14 +462,8 @@ class FleetReportController extends Controller
                 return [
                     'customer'        => $customer->name ?? '—',
                     'job_count'       => $jobs->count(),
-                    // FIX — was reading the legacy singular vehicle relation.
                     'vehicles_used'   => $this->distinctVehicleCount($jobs),
                     'routes_used'     => $jobs->where('job_type', 'direct')->pluck('route.name')->filter()->unique()->count(),
-                    // Item 3 (round 3) — other_charges_total already embeds
-                    // the ×vehicle-count multiplier for Direct jobs (and
-                    // equals job_total unchanged for Party-to-Party), so
-                    // these now reflect what's actually billed rather than
-                    // the raw, un-multiplied rate.
                     'total_amount'    => round($jobs->sum('other_charges_total'), 2),
                     'billed_amount'   => round($jobs->whereNotNull('bill_id')->sum('other_charges_total'), 2),
                     'unbilled_amount' => round($jobs->whereNull('bill_id')->sum('other_charges_total'), 2),
@@ -506,7 +473,7 @@ class FleetReportController extends Controller
             ->values();
     }
 
-    // ── Vendor Wise: Party-to-Party ledger — cost/sale/profit/advance/guarantee/balance per vendor ──
+    // ── Vendor Wise (Party-to-Party) ──
     private function vendorWise($from, $to)
     {
         return $this->jobsInRange($from, $to)
@@ -516,8 +483,6 @@ class FleetReportController extends Controller
             ->groupBy('vendor_id')
             ->map(function ($jobs, $vendorId) {
                 $vendor = $jobs->first()->vendor;
-                // Amounts are stored per vehicle; the pty_total_* accessors
-                // multiply by each job's vehicle count.
                 $totalCost = round($jobs->sum('pty_total_cost'), 2);
                 $totalSale = round($jobs->sum('pty_total_sale'), 2);
                 return [
@@ -535,7 +500,7 @@ class FleetReportController extends Controller
             ->values();
     }
 
-    // ── Route Wise: how much each route was used, by which vehicles, and revenue ──
+    // ── Route Wise (Direct only — Muqadum has no route master) ──
     private function routeWise($from, $to)
     {
         return $this->jobsInRange($from, $to)
@@ -546,20 +511,18 @@ class FleetReportController extends Controller
             ->map(function ($jobs, $routeId) {
                 $route = $jobs->first()->route;
                 return [
-                    'route'        => $route->name ?? '—',
-                    'trip_count'   => $jobs->count(),
-                    // FIX — was reading the legacy singular vehicle relation.
+                    'route'         => $route->name ?? '—',
+                    'trip_count'    => $jobs->count(),
                     'vehicles_used' => $this->distinctVehicleCount($jobs),
-                    'customers'    => $jobs->pluck('customer.name')->filter()->unique()->count(),
-                    // Item 3 (round 3) — see customerWise()'s note above.
-                    'total_amount' => round($jobs->sum('other_charges_total'), 2),
+                    'customers'     => $jobs->pluck('customer.name')->filter()->unique()->count(),
+                    'total_amount'  => round($jobs->sum('other_charges_total'), 2),
                 ];
             })
             ->sortByDesc('trip_count')
             ->values();
     }
 
-    // ── Customer × Route usage matrix ──
+    // ── Customer x Route usage ──
     private function customerRoutes($from, $to)
     {
         return $this->jobsInRange($from, $to)
@@ -572,9 +535,8 @@ class FleetReportController extends Controller
                 $byRoute = $jobs->groupBy('route_id')->map(function ($routeJobs) {
                     $route = $routeJobs->first()->route;
                     return [
-                        'route'      => $route->name ?? '—',
-                        'trip_count' => $routeJobs->count(),
-                        // Item 3 (round 3) — see customerWise()'s note above.
+                        'route'        => $route->name ?? '—',
+                        'trip_count'   => $routeJobs->count(),
                         'total_amount' => round($routeJobs->sum('other_charges_total'), 2),
                     ];
                 })->sortByDesc('trip_count')->values();

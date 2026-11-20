@@ -131,36 +131,6 @@ class DailyJob extends Model
         return $this->relationLoaded('madqamLines') ? $this->madqamLines : $this->madqamLines()->get();
     }
 
-    public function getMqVehicleCountAttribute(): int
-    {
-        return $this->mqLines()->count();
-    }
-
-    public function getMqTotalRentAttribute(): float
-    {
-        return round((float) $this->mqLines()->sum('amount'), 2);
-    }
-
-    public function getMqTotalAdvanceAttribute(): float
-    {
-        return round((float) $this->mq_advance * $this->mq_vehicle_count, 2);
-    }
-
-    public function getMqTotalGuaranteeAttribute(): float
-    {
-        return round((float) $this->mq_guarantee * $this->mq_vehicle_count, 2);
-    }
-
-    public function getMqTotalAttribute(): float
-    {
-        return round($this->mq_total_rent + $this->mq_total_guarantee, 2);
-    }
-
-    public function getMqBalanceAttribute(): float
-    {
-        return round($this->mq_total - $this->mq_total_advance, 2);
-    }
-
     // "TLR-1, TLR-2" — the vehicles on a Madqam job, for lists and the bill
     // picker. Expects madqamLines.vehicle to be loaded to avoid N+1.
     public function getMadqamVehicleListAttribute(): string
@@ -567,5 +537,41 @@ class DailyJob extends Model
             (float) $this->detention_total * $this->billableVehicleCount() + $this->direct_detention_total,
             2
         );
+    }
+
+    public function getMqVehicleCountAttribute(): int
+    {
+        return $this->mqLines()->count();
+    }
+
+    public function getMqTotalRentAttribute(): float
+    {
+        return round((float) $this->mqLines()->sum(fn ($l) => $l->rent_total), 2);
+    }
+
+    public function getMqTotalGuaranteeAttribute(): float
+    {
+        return round((float) $this->mqLines()->sum(fn ($l) => $l->guarantee_total), 2);
+    }
+
+    public function getMqTotalKantaAttribute(): float
+    {
+        return round((float) $this->mqLines()->sum(fn ($l) => $l->kanta_total), 2);
+    }
+
+    public function getMqTotalAdvanceAttribute(): float
+    {
+        return round((float) $this->mqLines()->sum('advance'), 2);
+    }
+
+    // Rent + guarantee + kanta over all days, all vehicles. This is job_total.
+    public function getMqTotalAttribute(): float
+    {
+        return round((float) $this->mqLines()->sum(fn ($l) => $l->line_total), 2);
+    }
+
+    public function getMqBalanceAttribute(): float
+    {
+        return round($this->mq_total - $this->mq_total_advance, 2);
     }
 }

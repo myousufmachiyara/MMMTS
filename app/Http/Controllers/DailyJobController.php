@@ -492,14 +492,15 @@ class DailyJobController extends Controller
             'date'        => 'required|date',
             'customer_id' => 'required|exists:chart_of_accounts,id',
             'remarks'     => 'nullable|string|max:1000',
-            // The vehicle grid: one row per vehicle, each with its rent.
-            'vehicles'              => 'required|array|min:1',
-            'vehicles.*.vehicle_id' => 'required|exists:vehicles,id',
-            'vehicles.*.rent'       => 'required|numeric|min:0',
-            // Advance and guarantee are entered PER VEHICLE (× vehicle count).
-            'advance'    => 'nullable|numeric|min:0',
-            'guarantee'  => 'nullable|numeric|min:0',
-            // Where the advance was received — a cash or bank account.
+            'vehicles'                => 'required|array|min:1',
+            'vehicles.*.vehicle_id'   => 'required|exists:vehicles,id',
+            'vehicles.*.start_date'   => 'required|date',
+            'vehicles.*.end_date'     => 'required|date|after_or_equal:vehicles.*.start_date',
+            'vehicles.*.destination'  => 'nullable|string|max:255',
+            'vehicles.*.rent'         => 'required|numeric|min:0',
+            'vehicles.*.advance'      => 'nullable|numeric|min:0',
+            'vehicles.*.guarantee'    => 'nullable|numeric|min:0',
+            'vehicles.*.kanta'        => 'nullable|numeric|min:0',
             'advance_account_id' => ['nullable', Rule::exists('chart_of_accounts', 'id')->whereIn('account_type', ['cash', 'bank'])],
         ];
     }
@@ -519,48 +520,49 @@ class DailyJobController extends Controller
     // (Dr cash/bank, Cr customer) the moment the job is saved.
     private function persistMadqam(Request $request, ?DailyJob $job = null)
     {
-        // A grid row left completely blank (an extra "Add Vehicle" click) is
-        // dropped instead of failing validation.
+        // A grid row left completely blank is dropped instead of failing validation.
         $request->merge(['vehicles' => array_values(array_filter(
             (array) $request->input('vehicles', []),
-            fn ($row) => is_array($row) && trim(($row['vehicle_id'] ?? '') . ($row['rent'] ?? '')) !== ''
+            fn ($row) => is_array($row) && trim(($row['vehicle_id'] ?? '') . ($row['destination'] ?? '') . ($row['rent'] ?? '')) !== ''
         ))]);
 
-        $data = $request->validate($this->madqamRules());
+        $data = $request->validate($this->madqamRules(), [
+            'vehicles.*.end_date.after_or_equal' => 'End date cannot be before the start date.',
+        ]);
 
-        $advancePerVehicle   = round((float) ($data['advance'] ?? 0), 2);
-        $guaranteePerVehicle = round((float) ($data['guarantee'] ?? 0), 2);
+        $lines = array_map(fn ($row) => [
+            'vehicle_id'  => (int) $row['vehicle_id'],
+            'start_date'  => $row['start_date'],
+            'end_date'    => $row['end_date'],
+            'destination' => isset($row['destination']) && trim($row['destination']) !== '' ? trim($row['destination']) : null,
+            'amount'      => round((float) $row['rent'], 2),
+            'advance'     => round((float) ($row['advance'] ?? 0), 2),
+            'guarantee'   => round((float) ($row['guarantee'] ?? 0), 2),
+            'kanta'       => round((float) ($row['kanta'] ?? 0), 2),
+        ], $data['vehicles']);
 
-        // An advance has to say which cash/bank account it went into.
-        if ($advancePerVehicle > 0 && empty($data['advance_account_id'])) {
+        $totalAdvance = round(array_sum(array_column($lines, 'advance')), 2);
+
+        // An advance has to say which cash/bank account it went into (one per job).
+        if ($totalAdvance > 0 && empty($data['advance_account_id'])) {
             throw \Illuminate\Validation\ValidationException::withMessages([
                 'advance_account_id' => 'Select the cash or bank account the advance was received in.',
             ]);
         }
-
-        $lines = array_map(fn ($row) => [
-            'vehicle_id' => (int) $row['vehicle_id'],
-            'amount'     => round((float) $row['rent'], 2),
-        ], $data['vehicles']);
-
-        $vehicleCount   = count($lines);
-        $totalRent      = round(array_sum(array_column($lines, 'amount')), 2);
-        $totalGuarantee = round($guaranteePerVehicle * $vehicleCount, 2);
-        $totalAdvance   = round($advancePerVehicle * $vehicleCount, 2);
 
         $payload = [
             'date'                  => $data['date'],
             'customer_id'           => $data['customer_id'],
             'remarks'               => $data['remarks'] ?? null,
             'trip_plan_total'       => 0,
-            'job_total'             => round($totalRent + $totalGuarantee, 2),
-            'mq_advance'            => $advancePerVehicle,
-            'mq_guarantee'          => $guaranteePerVehicle,
-            'mq_advance_account_id' => $advancePerVehicle > 0 ? (int) $data['advance_account_id'] : null,
+            'job_total'             => 0, // set below from the saved lines
+            'mq_advance'            => 0, // header advance/guarantee are no longer used
+            'mq_guarantee'          => 0,
+            'mq_advance_account_id' => $totalAdvance > 0 ? (int) $data['advance_account_id'] : null,
             'updated_by'            => auth()->id(),
         ];
 
-        return DB::transaction(function () use ($job, $payload, $lines, $vehicleCount, $totalAdvance, $advancePerVehicle) {
+        return DB::transaction(function () use ($job, $payload, $lines) {
             if ($job) {
                 $job->update($payload);
             } else {
@@ -572,24 +574,26 @@ class DailyJobController extends Controller
                 $job = DailyJob::create($payload);
             }
 
-            // Nothing else points at these rows, so replace the whole set
-            // with what the form sent.
             $job->madqamLines()->delete();
             $job->madqamLines()->createMany($lines);
 
-            $this->syncMuqadumAdvanceVoucher($job, $totalAdvance, $vehicleCount, $advancePerVehicle);
+            // job_total = sum of every vehicle's (rent + guarantee + kanta) x days.
+            $job->load('madqamLines');
+            $job->update(['job_total' => $job->mq_total]);
+
+            $this->syncMuqadumAdvanceVoucher($job);
 
             return $job;
         });
     }
 
-    // Keeps the advance's receipt voucher (Dr cash/bank account, Cr customer)
-    // in step with the job: created when an advance first appears, updated
-    // when the job is edited, removed when the advance is cleared (and, in
-    // destroy(), when the job is deleted).
-    private function syncMuqadumAdvanceVoucher(DailyJob $job, float $totalAdvance, int $vehicleCount, float $perVehicle): void
+    // Keeps the advance's receipt voucher (Dr cash/bank, Cr customer) in step with
+    // the job: created when an advance first appears, updated on edit, removed when
+    // the advance is cleared (and in destroy()).
+    private function syncMuqadumAdvanceVoucher(DailyJob $job): void
     {
-        $voucher = $job->mq_advance_voucher_id ? Voucher::find($job->mq_advance_voucher_id) : null;
+        $voucher      = $job->mq_advance_voucher_id ? Voucher::find($job->mq_advance_voucher_id) : null;
+        $totalAdvance = $job->mq_total_advance;
 
         if ($totalAdvance <= 0 || !$job->mq_advance_account_id) {
             if ($voucher) {
@@ -606,7 +610,7 @@ class DailyJobController extends Controller
             'ac_cr_sid'    => $job->customer_id,
             'amount'       => $totalAdvance,
             'reference'    => $job->job_no,
-            'remarks'      => "Advance received — Muqadum Job {$job->job_no} ({$vehicleCount} vehicle(s) × " . number_format($perVehicle, 2) . ')',
+            'remarks'      => "Advance received — Muqadum Job {$job->job_no} ({$job->mq_vehicle_count} vehicle(s))",
         ];
 
         if ($voucher) {
@@ -787,7 +791,6 @@ class DailyJobController extends Controller
     // list every vehicle-row (item 3).
     public function print($id)
     {
-        // print()
         $job = DailyJob::with([
             'customer', 'vendor',
             'madqamLines.vehicle', 'advanceAccount',
@@ -822,7 +825,6 @@ class DailyJobController extends Controller
         $pdf->Line(10, $yOffset + 30, 200, $yOffset + 30);
         $pdf->Ln(15);
 
-
         $pdf->SetFont('helvetica', '', 10);
         $statusLabel = $job->job_type === 'direct'
             ? ($job->status === 'incomplete' ? ' (INCOMPLETE — pending rates)' : '')
@@ -847,47 +849,59 @@ class DailyJobController extends Controller
         </table>';
         $pdf->writeHTML($infoHtml, true, false, false, false, '');
         $pdf->Ln(3);
+
         if ($job->job_type === 'madqam') {
-            // Vehicles with their rent, then the money summary:
-            // total (rent + guarantee), advance received, balance receivable.
             $pdf->SetFont('helvetica', 'B', 10);
             $pdf->Cell(0, 6, 'Vehicles (' . $job->madqamLines->count() . ')', 0, 1, 'L');
             $pdf->SetFont('helvetica', '', 10);
 
             $rowsHtml = '';
             foreach ($job->madqamLines as $mi => $ml) {
+                $period = ($ml->start_date && $ml->end_date)
+                    ? $ml->start_date->format('d-m-Y') . ' to ' . $ml->end_date->format('d-m-Y')
+                    : '—';
                 $rowsHtml .= '<tr>
                     <td align="center">' . ($mi + 1) . '</td>
-                    <td align="left">' . e($ml->vehicle->name ?? '') . ' (' . e($ml->vehicle->vehicle_no ?? '') . ')</td>
+                    <td align="left">' . e($ml->vehicle->name ?? '') . ' (' . e($ml->vehicle->vehicle_no ?? '') . ')'
+                        . ($ml->size !== '' ? '<br><span style="font-size:7px;color:#555555;">' . e($ml->size) . '</span>' : '') . '</td>
+                    <td align="left">' . e($ml->destination ?? '—') . '</td>
+                    <td align="left">' . $period . '<br><span style="font-size:7px;color:#555555;">' . $ml->days . ' day(s)</span></td>
                     <td align="right">' . number_format($ml->amount, 2) . '</td>
+                    <td align="right">' . number_format($ml->guarantee, 2) . '</td>
+                    <td align="right">' . number_format($ml->kanta, 2) . '</td>
+                    <td align="right">' . number_format($ml->line_total, 2) . '</td>
+                    <td align="right">' . number_format($ml->advance, 2) . '</td>
+                    <td align="right">' . number_format($ml->remaining, 2) . '</td>
                 </tr>';
             }
             $mqHtml = '
-            <table border="0.3" cellpadding="4" cellspacing="0" width="100%" style="font-size:10px;">
+            <table border="0.3" cellpadding="3" cellspacing="0" width="100%" style="font-size:8px;">
                 <tr style="background-color:#f5f5f5;font-weight:bold;">
-                    <th width="10%" align="center">#</th><th width="60%">Vehicle</th><th width="30%" align="right">Rent</th>
+                    <th width="4%" align="center">#</th><th width="16%">Vehicle / Size</th><th width="13%">Destination</th><th width="15%">Period</th>
+                    <th width="8%" align="right">Rent/day</th><th width="9%" align="right">Guar./day</th><th width="8%" align="right">Kanta/day</th>
+                    <th width="10%" align="right">Total</th><th width="9%" align="right">Advance</th><th width="8%" align="right">Remaining</th>
                 </tr>' . $rowsHtml . '
-                <tr style="background-color:#f5f5f5;">
-                    <td colspan="2" align="right"><b>Total Rent</b></td>
-                    <td align="right"><b>' . number_format($job->mq_total_rent, 2) . '</b></td>
-                </tr>
             </table>';
             $pdf->writeHTML($mqHtml, true, false, true, false, '');
-            $pdf->Ln(3);
+            $pdf->Ln(1);
+            $pdf->SetFont('helvetica', 'I', 8);
+            $pdf->Cell(0, 4, 'Total = (Rent + Guarantee + Kanta) per day × number of days. Remaining = Total − Advance.', 0, 1, 'L');
+            $pdf->SetFont('helvetica', '', 10);
+            $pdf->Ln(2);
 
-            $n = $job->mq_vehicle_count;
             $advAccount = $job->advanceAccount->name ?? null;
             $sumHtml = '
             <table border="0.3" cellpadding="4" cellspacing="0" width="100%" style="font-size:10px;">
                 <tr><td width="70%" align="left">Total Rent</td><td width="30%" align="right">' . number_format($job->mq_total_rent, 2) . '</td></tr>
-                <tr><td align="left">Guarantee (' . number_format($job->mq_guarantee, 2) . ' × ' . $n . ' vehicle(s))</td><td align="right">' . number_format($job->mq_total_guarantee, 2) . '</td></tr>
-                <tr style="background-color:#f5f5f5;font-weight:bold;"><td align="left">Total (Rent + Guarantee)</td><td align="right">' . number_format($job->mq_total, 2) . '</td></tr>
-                <tr><td align="left">Less: Advance Received (' . number_format($job->mq_advance, 2) . ' × ' . $n . ' vehicle(s))' . ($advAccount ? '<br><span style="font-size:8px;color:#555555;">received in ' . e($advAccount) . '</span>' : '') . '</td><td align="right">' . number_format($job->mq_total_advance, 2) . '</td></tr>
-                <tr style="background-color:#f5f5f5;font-weight:bold;"><td align="left">Balance Receivable (Total - Advance)</td><td align="right">' . number_format($job->mq_balance, 2) . '</td></tr>
+                <tr><td align="left">Total Guarantee</td><td align="right">' . number_format($job->mq_total_guarantee, 2) . '</td></tr>
+                <tr><td align="left">Total Kanta</td><td align="right">' . number_format($job->mq_total_kanta, 2) . '</td></tr>
+                <tr style="background-color:#f5f5f5;font-weight:bold;"><td align="left">Total (Rent + Guarantee + Kanta)</td><td align="right">' . number_format($job->mq_total, 2) . '</td></tr>
+                <tr><td align="left">Less: Advance Received' . ($advAccount ? '<br><span style="font-size:8px;color:#555555;">received in ' . e($advAccount) . '</span>' : '') . '</td><td align="right">' . number_format($job->mq_total_advance, 2) . '</td></tr>
+                <tr style="background-color:#f5f5f5;font-weight:bold;"><td align="left">Remaining Receivable (Total - Advance)</td><td align="right">' . number_format($job->mq_balance, 2) . '</td></tr>
             </table>';
             $pdf->writeHTML($sumHtml, true, false, true, false, '');
         }
-        elseif  ($job->job_type === 'party_to_party') {
+        elseif ($job->job_type === 'party_to_party') {
             $html = '
             <table border="0.3" cellpadding="4" cellspacing="0" width="100%" style="font-size:10px;">
                 <tr><td width="30%"><b>Vendor</b></td><td width="70%">' . e($job->vendor->name ?? '') . '</td></tr>
@@ -896,9 +910,6 @@ class DailyJobController extends Controller
             $pdf->writeHTML($html, true, false, true, false, '');
             $pdf->Ln(3);
 
-            // The vendor's vehicle(s) — free text, one row each (falls back
-            // to the legacy single vehicle/size on the job for a job that
-            // somehow has no rows).
             $ptyVehicles = $job->ptyVehicles->isNotEmpty()
                 ? $job->ptyVehicles
                 : collect([(object) ['vehicle_no' => $job->pty_vehicle_no, 'route' => null, 'size' => $job->pty_size]]);
@@ -923,8 +934,6 @@ class DailyJobController extends Controller
             $pdf->writeHTML($vehHtml, true, false, true, false, '');
             $pdf->Ln(3);
 
-            // Amounts are entered PER VEHICLE; with more than one vehicle the
-            // job's totals (per-vehicle amount × vehicles) get their own row.
             $ptyCount = $job->billableVehicleCount();
             $ptyTotalsRows = $ptyCount > 1 ? '
                 <tr style="background-color:#f5f5f5;">
@@ -961,10 +970,6 @@ class DailyJobController extends Controller
             $pdf->SetFont('helvetica', 'B', 11);
             $pdf->Cell(0, 8, 'Profit: ' . number_format($job->pty_profit, 2), 0, 1, 'R');
         } else {
-            // Route/trip plan/rates/detention/extra-port-charges are shared
-            // across every vehicle on the job (multi-vehicle-form change) —
-            // shown once here, followed by a simple list of the vehicles
-            // (and their own Delivery Challan, which stays per-vehicle).
             $pdf->SetFont('helvetica', 'B', 10);
             $pdf->Cell(0, 6, 'Trip & Charges', 0, 1, 'L');
 
@@ -998,8 +1003,6 @@ class DailyJobController extends Controller
             $pdf->SetFont('helvetica', 'B', 10);
             $pdf->Cell(0, 6, 'Vehicles (' . $job->vehicles->count() . ')', 0, 1, 'L');
 
-            // Detention days / nights are entered per vehicle, so they sit in the
-            // vehicle's own row (only when some vehicle actually has detention).
             $hasDet = $job->vehicles->contains(fn ($l) => (int) $l->detention_days > 0 || (int) $l->detention_nights > 0);
             $vehHtml = '<table border="0.3" cellpadding="4" cellspacing="0" width="100%" style="font-size:10px;">
                 <tr style="background-color:#f5f5f5;font-weight:bold;">

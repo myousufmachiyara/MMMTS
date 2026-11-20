@@ -484,9 +484,6 @@ public function update(Request $request, $id)
         $pdf->AddPage();
         $pdf->setCellPadding(1.5);
 
-        // Item 8 — company-wise letterhead. A bill created before this
-        // change (or with no company picked) has no $bill->company and
-        // falls back to the old hard-coded M M Logistics block below.
         $company = $bill->company;
         $textX = 10;
         if ($company) {
@@ -564,36 +561,20 @@ public function update(Request $request, $id)
         foreach ($bill->jobs as $i => $job) {
             $isPty = $job->job_type === 'party_to_party';
             $isMq  = $job->job_type === 'madqam';
-            // Detention note under the amount: the detention days / nights (when
-            // every vehicle has the same), or the single date an older job was
-            // saved with.
             $detDateNote = '';
             if (!$isPty && !$isMq && $job->detention_summary !== '') {
                 $detDateNote = '<br><span style="font-size:7px;color:#555555;">' . e($job->detention_summary) . '</span>';
             } elseif (!$isPty && !$isMq && $job->detention_date && (float) $job->detention_total != 0.0) {
                 $detDateNote = '<br><span style="font-size:7px;color:#555555;">on ' . $job->detention_date->format('d-m-Y') . '</span>';
             }
-            // Item 3 (round 3) — a Direct job's shared charges are entered once
-            // and billed once per vehicle (rent is per vehicle), so a
-            // multi-vehicle job reads, left to right: charges PER VEHICLE
-            // (Detention / Other columns), then the number of vehicles and the
-            // resulting TOTAL (Job Total column).
-            // A single-vehicle job (and every Party-to-Party job) prints
-            // exactly as it always did — no notes, per-vehicle == total.
             $vehicleCount = $job->billableVehicleCount();
             $multi        = $vehicleCount > 1;
             $perNote      = $multi ? '<br><span style="font-size:7px;color:#555555;">per vehicle</span>' : '';
             $totalNote    = $multi ? '<br><span style="font-size:7px;color:#555555;">× ' . $vehicleCount . ' vehicles</span>' : '';
-            // When the vehicles on a Direct job have DIFFERENT rents there is no
-            // single "per vehicle" figure — the Other column then shows the
-            // average per vehicle (the Job Total is always the exact sum, and
-            // the Charges Breakdown below lists each vehicle's rent).
             $rentVaries   = $multi && !$isPty && !$isMq && !$job->has_uniform_vehicle_charges;
             $otherNote    = $rentVaries
                 ? '<br><span style="font-size:7px;color:#555555;">avg per vehicle</span>'
                 : $perNote;
-            // Detention is per vehicle too (and can differ), so the column shows
-            // the per-vehicle figure — the average when the vehicles differ.
             $detentionPerVehicle = ($isPty || $isMq) ? 0 : round((float) $job->detention_charges_total / $vehicleCount, 2);
             $detNote = ($multi && !$isPty && !$isMq && !$job->has_uniform_detention)
                 ? '<br><span style="font-size:7px;color:#555555;">avg per vehicle</span>'
@@ -604,19 +585,23 @@ public function update(Request $request, $id)
                 : ($isMq
                     ? ($job->madqam_vehicle_list ?: '—')
                     : ($job->destinationLocation->location_name ?? ($vehicleNames ?: '—')));
+            $destText = $isPty
+                ? ($job->pty_destination ?? '—')
+                : ($isMq
+                    ? ($job->madqamLines->pluck('destination')->filter()->unique()->implode(', ') ?: 'Muqadum')
+                    : ($job->route->name ?? ($job->vehicles->pluck('route.name')->filter()->implode(', ') ?: '—')));
             $html .= '<tr>
                 <td>' . ($i + 1) . '</td>
                 <td>' . e($job->job_no) . '</td>
                 <td>' . $job->date->format('d-m-Y') . '</td>
                 <td>' . e($unitText) . '</td>
-                <td>' . e($isPty ? ($job->pty_destination ?? '—') : ($isMq ? 'Muqadum' : ($job->route->name ?? ($job->vehicles->pluck('route.name')->filter()->implode(', ') ?: '—')))) . '</td>
+                <td>' . e($destText) . '</td>
                 <td align="right">' . number_format($detentionPerVehicle, 2) . $detDateNote . $detNote . '</td>
                 <td align="right">' . number_format($job->other_charges_per_vehicle, 2) . $otherNote . '</td>
                 <td align="right">' . number_format($job->bill_amount, 2) . $totalNote . '</td>
             </tr>';
         }
 
-        // Tax comes from the invoice this bill is on (if any, and if taxable).
         $taxInvoice    = $bill->invoice_id ? Invoice::find($bill->invoice_id) : null;
         $billTaxPct    = ($taxInvoice && $taxInvoice->is_taxable) ? (float) $taxInvoice->tax_percent : 0;
         $billTaxAmount = round((float) $bill->total_amount * $billTaxPct / 100, 2);
@@ -657,25 +642,13 @@ public function update(Request $request, $id)
         $html .= '</table>';
         $pdf->writeHTML($html, true, false, true, false, '');
 
-        // Item 9 — the Rent/Labour/Yard/Kanta/Extra Port/Detention breakdown
-        // that used to live on the Job Slip print now lives here instead,
-        // summed across every job this bill aggregates (same row labels and
-        // layout Job Slip used to show for a single job).
         $pdf->SetFont('helvetica', 'B', 10);
         $pdf->Cell(0, 6, 'Charges Breakdown', 0, 1, 'L');
 
-        // Item 3 (round 3) — each row's amount is the TOTAL billed (charge per
-        // vehicle × vehicles, summed over the bill's jobs), so it reconciles
-        // with the "Other Charges Subtotal" / grand total above. For every job
-        // that has more than one vehicle, a small note under the row label
-        // spells out the working — charge per vehicle × number of vehicles —
-        // so the per-vehicle figure isn't lost. Single-vehicle jobs need no
-        // note (per vehicle == total). With several jobs on the bill each
-        // note is tagged with its job no.; with one job it isn't, to keep it short.
         $multipleJobs = $bill->jobs->count() > 1;
         $breakdownRow = function (string $label, callable $perVehicleOf) use ($bill, $multipleJobs) {
             $total       = 0;
-            $singleTotal = 0; // single-vehicle jobs' share, so the note still adds up to the amount
+            $singleTotal = 0;
             $notes       = [];
             foreach ($bill->jobs as $job) {
                 $vehicleCount = $job->billableVehicleCount();
@@ -697,18 +670,14 @@ public function update(Request $request, $id)
 
             return '<tr><td width="80%" align="left">' . $label . $noteHtml . '</td><td width="20%">' . number_format($total, 2) . '</td></tr>';
         };
-        $isPtyJob = fn ($job) => $job->job_type === 'party_to_party';
+        // Muqadum has no labour/yard/kanta/port columns of its own, so skip it here.
+        $isPtyJob = fn ($job) => $job->job_type === 'party_to_party' || $job->job_type === 'madqam';
 
-        // Rent is entered per vehicle, so this row SUMS each vehicle's own rent
-        // instead of multiplying one rent by the vehicle count. Same row, same
-        // note style as the others: when a job's vehicles share one rent the
-        // note reads "X per vehicle × N vehicles" exactly as before; when the
-        // rents differ it lists each vehicle's rent instead.
         $rentTotal  = 0;
-        $rentSingle = 0; // single-vehicle jobs' share, so the note still adds up to the amount
+        $rentSingle = 0;
         $rentNotes  = [];
         foreach ($bill->jobs as $job) {
-            if ($isPtyJob($job) || $job->job_type === 'madqam') {
+            if ($isPtyJob($job)) {
                 continue;
             }
             $jobRent    = $job->direct_rent_total;
@@ -734,9 +703,6 @@ public function update(Request $request, $id)
             . ($rentNotes ? '<br><span style="font-size:8px;color:#555555;">' . implode('; ', $rentNotes) . '</span>' : '')
             . '</td><td width="20%">' . number_format($rentTotal, 2) . '</td></tr>';
 
-        // Extra Port Charges itemised per port (summed across the bill's jobs,
-        // each job's charge × its vehicle count, so the lines add up to the
-        // "Extra Port Charges" row they sit under).
         $portTotals = [];
         foreach ($bill->jobs as $job) {
             if ($isPtyJob($job)) {
@@ -753,18 +719,13 @@ public function update(Request $request, $id)
             $portRowsHtml .= '<tr style="color:#444444;font-size:9px;"><td width="80%" align="left">&nbsp;&nbsp;&nbsp;- ' . e($name) . '</td><td width="20%">' . number_format($amt, 2) . '</td></tr>';
         }
 
-        // Detention is entered per vehicle: day rate x days + night rate x nights
-        // (the first day is the Rent). This row SUMS each vehicle's own
-        // detention, plus the old shared detention (x vehicles) of a job saved
-        // before that. The note under it spells out the working, like the Rent
-        // row above.
         $detTotal  = 0;
-        $detSingle = 0; // single-vehicle old-style jobs' share, so the notes still add up
+        $detSingle = 0;
         $detNotes  = [];
         $detPeriods = [];
         $fmtN = fn ($n) => number_format($n, 2);
         foreach ($bill->jobs as $job) {
-            if ($isPtyJob($job) || $job->job_type === 'madqam') {
+            if ($isPtyJob($job)) {
                 continue;
             }
             $tag       = $multipleJobs ? e($job->job_no) . ': ' : '';
@@ -786,12 +747,10 @@ public function update(Request $request, $id)
             if ($newTotal != 0.0) {
                 $lines = $job->vehicles->filter(fn ($v) => $v->vehicle_id && $job->lineDetention($v) != 0.0);
                 if ($vc > 1 && !$job->has_identical_detention_terms) {
-                    // Vehicles differ: one entry each, with its days / nights.
                     $parts[] = $lines
                         ->map(fn ($v) => e($v->vehicle->name ?? '') . ' ' . $fmtN($job->lineDetention($v)) . ' (' . $v->detention_label . ')')
                         ->implode(', ');
                 } else {
-                    // Same terms on every vehicle: day rate × days + night rate × nights.
                     $v = $lines->first();
                     $calc = [];
                     if ((int) $v->detention_days > 0 && (float) $v->detention_day_charge != 0.0) {
@@ -819,12 +778,9 @@ public function update(Request $request, $id)
             . ($detNotes ? '<br><span style="font-size:8px;color:#555555;">' . implode('; ', $detNotes) . '</span>' : '')
             . '</td><td width="20%">' . number_format($detTotal, 2) . '</td></tr>';
 
-        // Muqadum jobs (vehicle hire) have none of the charges above. Their
-        // rent and guarantee each get one row here (with the per-vehicle
-        // working underneath), so the breakdown still adds up to the bill
-        // total; the advance and balance follow in a small summary below.
-        $mqRent = $mqGuarantee = $mqAdvance = 0;
-        $mqRentNotes = $mqGuaranteeNotes = [];
+        // Muqadum rows: rent / guarantee / kanta, each over all days.
+        $mqRent = $mqGuarantee = $mqKanta = $mqAdvance = 0;
+        $mqRentNotes = $mqGuaranteeNotes = $mqKantaNotes = [];
         foreach ($bill->jobs as $job) {
             if ($job->job_type !== 'madqam') {
                 continue;
@@ -832,21 +788,34 @@ public function update(Request $request, $id)
             $tag = $multipleJobs ? e($job->job_no) . ': ' : '';
             $mqRent      += $job->mq_total_rent;
             $mqGuarantee += $job->mq_total_guarantee;
+            $mqKanta     += $job->mq_total_kanta;
             $mqAdvance   += $job->mq_total_advance;
+
             $mqRentNotes[] = $tag . $job->madqamLines
-                ->map(fn ($ml) => e($ml->vehicle->name ?? '') . ' ' . number_format($ml->amount, 2))
+                ->map(fn ($ml) => e($ml->vehicle->name ?? '') . ' ' . number_format($ml->amount, 2) . ' × ' . $ml->days . ' day(s)')
                 ->implode(', ');
             if ($job->mq_total_guarantee > 0) {
-                $mqGuaranteeNotes[] = $tag . number_format($job->mq_guarantee, 2) . ' per vehicle × ' . $job->mq_vehicle_count . ' vehicles';
+                $mqGuaranteeNotes[] = $tag . $job->madqamLines->filter(fn ($ml) => $ml->guarantee > 0)
+                    ->map(fn ($ml) => e($ml->vehicle->name ?? '') . ' ' . number_format($ml->guarantee, 2) . ' × ' . $ml->days . ' day(s)')
+                    ->implode(', ');
+            }
+            if ($job->mq_total_kanta > 0) {
+                $mqKantaNotes[] = $tag . $job->madqamLines->filter(fn ($ml) => $ml->kanta > 0)
+                    ->map(fn ($ml) => e($ml->vehicle->name ?? '') . ' ' . number_format($ml->kanta, 2) . ' × ' . $ml->days . ' day(s)')
+                    ->implode(', ');
             }
         }
         $madqamRowHtml = '';
-        if ($mqRent > 0 || $mqGuarantee > 0) {
+        if ($mqRent > 0 || $mqGuarantee > 0 || $mqKanta > 0) {
             $madqamRowHtml .= '<tr><td width="80%" align="left">Muqadum Rent<br><span style="font-size:8px;color:#555555;">' . implode('; ', $mqRentNotes) . '</span></td><td width="20%">' . number_format($mqRent, 2) . '</td></tr>';
             if ($mqGuarantee > 0) {
                 $madqamRowHtml .= '<tr><td width="80%" align="left">Muqadum Guarantee<br><span style="font-size:8px;color:#555555;">' . implode('; ', $mqGuaranteeNotes) . '</span></td><td width="20%">' . number_format($mqGuarantee, 2) . '</td></tr>';
             }
+            if ($mqKanta > 0) {
+                $madqamRowHtml .= '<tr><td width="80%" align="left">Muqadum Kanta<br><span style="font-size:8px;color:#555555;">' . implode('; ', $mqKantaNotes) . '</span></td><td width="20%">' . number_format($mqKanta, 2) . '</td></tr>';
+            }
         }
+
         $breakdownHtml = '
         <table border="0.3" cellpadding="4" cellspacing="0" width="100%" style="text-align:right;font-size:10px;">'
             . $rentRowHtml
@@ -854,49 +823,48 @@ public function update(Request $request, $id)
             . $breakdownRow('Yard Charges',          fn ($job) => $isPtyJob($job) ? 0 : $job->yard_charges)
             . $breakdownRow('Weight Bridge (Kanta)', fn ($job) => $isPtyJob($job) ? 0 : $job->kanta_charges)
             . $breakdownRow('Extra Port Charges',    fn ($job) => $isPtyJob($job) ? 0 : $job->extra_port_charges_total)
-            . $portRowsHtml                                                                                    // ← NEW
+            . $portRowsHtml
             . $detRowHtml
             . $madqamRowHtml
         . '</table>';
         $pdf->writeHTML($breakdownHtml, true, false, true, false, '');
         $pdf->Ln(4);
-         if ($mqRent > 0 || $mqGuarantee > 0) {
+
+        if ($mqRent > 0 || $mqGuarantee > 0 || $mqKanta > 0) {
+            $mqGrand = $mqRent + $mqGuarantee + $mqKanta;
             $pdf->SetFont('helvetica', 'B', 10);
             $pdf->Cell(0, 6, 'Muqadum Summary', 0, 1, 'L');
             $mqSummaryHtml = '
             <table border="0.3" cellpadding="4" cellspacing="0" width="100%" style="text-align:right;font-size:10px;">
-                <tr><td width="80%" align="left">Muqadum Total (Rent + Guarantee)</td><td width="20%">' . number_format($mqRent + $mqGuarantee, 2) . '</td></tr>
+                <tr><td width="80%" align="left">Muqadum Total (Rent + Guarantee + Kanta)</td><td width="20%">' . number_format($mqGrand, 2) . '</td></tr>
                 <tr><td width="80%" align="left">Less: Advance Received</td><td width="20%">' . number_format($mqAdvance, 2) . '</td></tr>
-                <tr style="font-weight:bold;background-color:#f5f5f5;"><td width="80%" align="left">Balance (Total - Advance)</td><td width="20%">' . number_format($mqRent + $mqGuarantee - $mqAdvance, 2) . '</td></tr>
+                <tr style="font-weight:bold;background-color:#f5f5f5;"><td width="80%" align="left">Remaining (Total - Advance)</td><td width="20%">' . number_format($mqGrand - $mqAdvance, 2) . '</td></tr>
             </table>';
             $pdf->writeHTML($mqSummaryHtml, true, false, true, false, '');
             $pdf->Ln(4);
         }
-        // Item 10 — every vehicle across every job on this bill (matching
-        // the Job Slip's own Vehicles table), rather than the collapsed
-        // comma-separated list in the "Vehicle / Vendor" column above.
+
         $vehicleRowsHtml = '';
         $vi = 0;
         foreach ($bill->jobs as $job) {
             if ($job->job_type === 'madqam') {
-                // One row per hired-out vehicle; its rent sits under the
-                // vehicle name (no container / DC on a Muqadum job).
                 foreach ($job->madqamLines as $ml) {
                     $vi++;
+                    $mqPeriod = ($ml->start_date && $ml->end_date)
+                        ? $ml->start_date->format('d-m-Y') . ' to ' . $ml->end_date->format('d-m-Y') . ' (' . $ml->days . ' day' . ($ml->days == 1 ? '' : 's') . ')'
+                        : null;
+                    $mqNote = implode(' · ', array_filter([$ml->size ?: null, $mqPeriod, $ml->destination, 'total ' . number_format($ml->line_total, 2)]));
                     $vehicleRowsHtml .= '<tr>
                     <td>' . $vi . '</td>
                     <td>' . e($job->job_no) . '</td>
-                    <td>' . e($ml->vehicle->name ?? '') . ' (' . e($ml->vehicle->vehicle_no ?? '') . ')<br><span style="font-size:7px;color:#555555;">rent ' . number_format($ml->amount, 2) . '</span></td>
+                    <td>' . e($ml->vehicle->name ?? '') . ' (' . e($ml->vehicle->vehicle_no ?? '') . ')<br><span style="font-size:7px;color:#555555;">' . e($mqNote) . '</span></td>
                     <td>—</td>
                     <td>—</td>
                 </tr>';
                 }
                 continue;
             }
-            else if ($job->job_type === 'party_to_party') {
-                // One row per vendor vehicle (free-text no.; route/size shown
-                // as a small note under it when entered). Jobs saved before
-                // multi-vehicle fall back to their single legacy vehicle.
+            elseif ($job->job_type === 'party_to_party') {
                 $ptyRows = $job->ptyVehicles->isNotEmpty()
                     ? $job->ptyVehicles
                     : collect([(object) ['vehicle_no' => $job->pty_vehicle_no, 'route' => null, 'size' => $job->pty_size]]);
@@ -942,14 +910,11 @@ public function update(Request $request, $id)
         $pdf->MultiCell(0, 4, $billNote, 0, 'L', false, 1);
         $pdf->SetFont('helvetica', '', 10);
         $pdf->Ln(2);
-        
+
         if (!empty($bill->remarks)) {
             $pdf->writeHTML('<b>Remarks:</b><br><span style="font-size:12px;">' . nl2br(e($bill->remarks)) . '</span>', true, false, true, false, '');
         }
 
-        // If the content above has filled the page, start the signature block
-        // on a fresh page as a whole instead of letting the line and its
-        // "Prepared By / Authorized By" labels split across pages.
         if ($pdf->GetY() + 32 > $pdf->getPageHeight() - $pdf->getBreakMargin()) {
             $pdf->AddPage();
         }
