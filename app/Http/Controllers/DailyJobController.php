@@ -852,37 +852,61 @@ class DailyJobController extends Controller
 
         if ($job->job_type === 'madqam') {
             $pdf->SetFont('helvetica', 'B', 10);
-            $pdf->Cell(0, 6, 'Vehicles (' . $job->madqamLines->count() . ')', 0, 1, 'L');
+            $pdf->Cell(0, 6, 'Vehicle Details (' . $job->madqamLines->count() . ')', 0, 1, 'L');
             $pdf->SetFont('helvetica', '', 10);
 
             $rowsHtml = '';
+            $sumAdvance = $sumTotal = $sumRemaining = 0;
             foreach ($job->madqamLines as $mi => $ml) {
-                $period = ($ml->start_date && $ml->end_date)
-                    ? $ml->start_date->format('d-m-Y') . ' to ' . $ml->end_date->format('d-m-Y')
-                    : '—';
+                $sumAdvance   += $ml->advance;
+                $sumTotal     += $ml->line_total;
+                $sumRemaining += $ml->remaining;
+
                 $rowsHtml .= '<tr>
                     <td align="center">' . ($mi + 1) . '</td>
-                    <td align="left">' . e($ml->vehicle->name ?? '') . ' (' . e($ml->vehicle->vehicle_no ?? '') . ')'
-                        . ($ml->size !== '' ? '<br><span style="font-size:7px;color:#555555;">' . e($ml->size) . '</span>' : '') . '</td>
-                    <td align="left">' . e($ml->destination ?? '—') . '</td>
-                    <td align="left">' . $period . '<br><span style="font-size:7px;color:#555555;">' . $ml->days . ' day(s)</span></td>
+                    <td align="left">' . e($ml->vehicle->name ?? '') . '<br><span style="font-size:6px;color:#555555;">' . e($ml->vehicle->vehicle_no ?? '') . '</span></td>
+                    <td align="center">' . e($ml->size) . '</td>
+                    <td align="center">' . ($ml->start_date ? $ml->start_date->format('d-m-y') : '—') . '</td>
+                    <td align="center">' . ($ml->end_date ? $ml->end_date->format('d-m-y') : '—') . '</td>
+                    <td align="center">' . $ml->days . '</td>
+                    <td align="left">' . e($ml->destination ?? '') . '</td>
                     <td align="right">' . number_format($ml->amount, 2) . '</td>
+                    <td align="right">' . number_format($ml->advance, 2) . '</td>
                     <td align="right">' . number_format($ml->guarantee, 2) . '</td>
                     <td align="right">' . number_format($ml->kanta, 2) . '</td>
-                    <td align="right">' . number_format($ml->line_total, 2) . '</td>
-                    <td align="right">' . number_format($ml->advance, 2) . '</td>
+                    <td align="right"><b>' . number_format($ml->line_total, 2) . '</b></td>
                     <td align="right">' . number_format($ml->remaining, 2) . '</td>
                 </tr>';
             }
+
             $mqHtml = '
-            <table border="0.3" cellpadding="3" cellspacing="0" width="100%" style="font-size:8px;">
+            <table border="0.3" cellpadding="2" cellspacing="0" width="100%" style="font-size:7px;">
                 <tr style="background-color:#f5f5f5;font-weight:bold;">
-                    <th width="4%" align="center">#</th><th width="16%">Vehicle / Size</th><th width="13%">Destination</th><th width="15%">Period</th>
-                    <th width="8%" align="right">Rent/day</th><th width="9%" align="right">Guar./day</th><th width="8%" align="right">Kanta/day</th>
-                    <th width="10%" align="right">Total</th><th width="9%" align="right">Advance</th><th width="8%" align="right">Remaining</th>
+                    <th width="3%" align="center">#</th>
+                    <th width="12%">Vehicle</th>
+                    <th width="6%" align="center">Size</th>
+                    <th width="8%" align="center">Start Date</th>
+                    <th width="8%" align="center">End Date</th>
+                    <th width="4%" align="center">Days</th>
+                    <th width="12%">Destination</th>
+                    <th width="8%" align="right">Rent / day</th>
+                    <th width="8%" align="right">Advance</th>
+                    <th width="8%" align="right">Guarantee / day</th>
+                    <th width="7%" align="right">Kanta / day</th>
+                    <th width="8%" align="right">Total</th>
+                    <th width="8%" align="right">Remaining</th>
                 </tr>' . $rowsHtml . '
+                <tr style="background-color:#f5f5f5;font-weight:bold;">
+                    <td colspan="8" align="right">Total</td>
+                    <td align="right">' . number_format($sumAdvance, 2) . '</td>
+                    <td></td>
+                    <td></td>
+                    <td align="right">' . number_format($sumTotal, 2) . '</td>
+                    <td align="right">' . number_format($sumRemaining, 2) . '</td>
+                </tr>
             </table>';
             $pdf->writeHTML($mqHtml, true, false, true, false, '');
+
             $pdf->Ln(1);
             $pdf->SetFont('helvetica', 'I', 8);
             $pdf->Cell(0, 4, 'Total = (Rent + Guarantee + Kanta) per day × number of days. Remaining = Total − Advance.', 0, 1, 'L');
