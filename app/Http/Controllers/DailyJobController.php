@@ -856,7 +856,7 @@ class DailyJobController extends Controller
 
             return $message;
         });
-    }`
+    }
     public function show($id)
     {
         $job = DailyJob::with([
