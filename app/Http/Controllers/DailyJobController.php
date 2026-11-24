@@ -1014,12 +1014,33 @@ class DailyJobController extends Controller
             $pdf->Ln(2);
 
             if ($job->sharedExtraPortCharges->count()) {
+                $epVehicles = $job->billableVehicleCount();
+                $epMulti    = $epVehicles > 1;
+                $epPerVeh   = 0;
+
+                $pdf->SetFont('helvetica', 'B', 10);
+                $pdf->Cell(0, 6, 'Extra Port Charges', 0, 1, 'L');
+                $pdf->SetFont('helvetica', '', 10);
+
                 $extraHtml = '<table border="0.3" cellpadding="4" cellspacing="0" width="100%" style="font-size:10px;">
-                    <tr style="background-color:#f5f5f5;font-weight:bold;"><th>Port</th><th>Charges</th></tr>';
+                    <tr style="background-color:#f5f5f5;font-weight:bold;">
+                        <th width="' . ($epMulti ? 50 : 70) . '%">Port</th>
+                        <th width="' . ($epMulti ? 25 : 30) . '%" align="right">Charges' . ($epMulti ? ' (per vehicle)' : '') . '</th>'
+                        . ($epMulti ? '<th width="25%" align="right">Total (× ' . $epVehicles . ' vehicles)</th>' : '') . '
+                    </tr>';
                 foreach ($job->sharedExtraPortCharges as $epc) {
-                    $extraHtml .= '<tr><td>' . e($epc->port->name ?? '') . '</td><td align="right">' . number_format($epc->charges, 2) . '</td></tr>';
+                    $epPerVeh += (float) $epc->charges;
+                    $extraHtml .= '<tr>
+                        <td>' . e($epc->port->name ?? '') . '</td>
+                        <td align="right">' . number_format($epc->charges, 2) . '</td>'
+                        . ($epMulti ? '<td align="right">' . number_format($epc->charges * $epVehicles, 2) . '</td>' : '') . '
+                    </tr>';
                 }
-                $extraHtml .= '</table>';
+                $extraHtml .= '<tr style="background-color:#f5f5f5;font-weight:bold;">
+                    <td align="right">Total Port Charges</td>
+                    <td align="right">' . number_format($epPerVeh, 2) . '</td>'
+                    . ($epMulti ? '<td align="right">' . number_format($epPerVeh * $epVehicles, 2) . '</td>' : '') . '
+                </tr></table>';
                 $pdf->writeHTML($extraHtml, true, false, true, false, '');
                 $pdf->Ln(2);
             }
