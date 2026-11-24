@@ -9,6 +9,8 @@ use App\Models\DailyJobVehicle;
 use App\Models\DeliveryChallan;
 use App\Models\Port;
 use App\Models\Vehicle;
+use App\Models\Bill;
+use App\Models\Invoice;
 use App\Models\VehicleRoute;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -717,17 +719,8 @@ class DailyJobController extends Controller
         $job = DailyJob::with([
             'vehicles.deliveryChallan', 'ptyVehicles', 'madqamLines', 'route', 'pickupPort', 'dropoffPort',
             'destinationLocation', 'sharedExtraPortCharges',
-            // Item 1 — deliveryChallans.vehicleLine lets pendingDeliveryChallan
-            // (see _form.blade.php's pendingDc handling) find, without an
-            // N+1, the DC that spawned this job if it hasn't been assigned
-            // to a vehicle-row yet.
             'deliveryChallans.vehicleLine',
         ])->findOrFail($id);
-
-        if ($job->bill_id) {
-            return redirect()->route('daily-jobs.index')
-                ->with('error', 'This job is already on a bill and can no longer be edited.');
-        }
 
         return view('daily_jobs.edit', array_merge(['job' => $job], $this->formData()));
     }
@@ -737,15 +730,17 @@ class DailyJobController extends Controller
         try {
             $job = DailyJob::findOrFail($id);
 
-            if ($job->bill_id) {
-                return redirect()->back()->with('error', 'This job is already on a bill and can no longer be edited.');
-            }
-
             $this->persist($request, $job);
+
+            $note = '';
+            $job->refresh();
+            if ($job->bill_id) {
+                $note = ' ' . $this->resyncBilling($job);
+            }
 
             Log::info('[DailyJob] Updated', ['id' => $id, 'user' => auth()->id()]);
 
-            return redirect()->route('daily-jobs.index')->with('success', "Daily job {$job->job_no} updated successfully.");
+            return redirect()->route('daily-jobs.index')->with('success', "Daily job {$job->job_no} updated successfully." . $note);
 
         } catch (\Throwable $e) {
             Log::error('[DailyJob] Update error', ['message' => $e->getMessage()]);
@@ -753,6 +748,115 @@ class DailyJobController extends Controller
         }
     }
 
+    // After a BILLED job is edited: recompute its bill, the bill's vouchers, and
+    // the invoice the bill is on (if any). Payments already recorded stay as they
+    // are; only the invoice status is re-derived from paid_amount vs the new total.
+    private function resyncBilling(DailyJob $job): string
+    {
+        return DB::transaction(function () use ($job) {
+            $bill = Bill::whereKey($job->bill_id)->lockForUpdate()->first();
+            if (!$bill) {
+                return '';
+            }
+
+            // 1) Vendor-payable voucher for a Party-to-Party job.
+            if ($job->job_type === 'party_to_party') {
+                $job->load('ptyVehicles');
+                $cost    = (float) $job->pty_total_cost;
+                $voucher = $job->pty_voucher_id ? Voucher::find($job->pty_voucher_id) : null;
+
+                if ($job->vendor_id && $cost > 0) {
+                    if ($voucher) {
+                        $voucher->update(['ac_cr_sid' => $job->vendor_id, 'amount' => $cost]);
+                    } else {
+                        $costAccountId = ChartOfAccounts::where('account_type', 'cogs')->orderBy('id')->value('id')
+                            ?? ChartOfAccounts::where('account_type', 'expenses')->orderBy('id')->value('id');
+                        if ($costAccountId) {
+                            $voucher = Voucher::create([
+                                'voucher_type' => 'journal',
+                                'date'         => $bill->bill_date,
+                                'ac_dr_sid'    => $costAccountId,
+                                'ac_cr_sid'    => $job->vendor_id,
+                                'amount'       => $cost,
+                                'reference'    => $bill->bill_no,
+                                'remarks'      => "Vendor payable — Job {$job->job_no} ({$job->billableVehicleCount()} vehicle(s)) — Bill {$bill->bill_no}",
+                            ]);
+                            $job->update(['pty_voucher_id' => $voucher->id]);
+                        }
+                    }
+                } elseif ($voucher) {
+                    $voucher->delete();
+                    $job->update(['pty_voucher_id' => null]);
+                }
+            }
+
+            // 2) Bill totals from all of its jobs.
+            $jobs = DailyJob::with(['vehicles', 'ptyVehicles', 'madqamLines'])->where('bill_id', $bill->id)->get();
+            $tripPlan   = round($jobs->sum('trip_plan_total'), 2);
+            $detention  = round($jobs->sum('detention_charges_total'), 2);
+            $other      = round($jobs->sum('other_charges_total'), 2);
+            $billTotal  = round($tripPlan + $other, 2);
+
+            $bill->update([
+                'trip_plan_subtotal'         => $tripPlan,
+                'other_charges_subtotal'     => $other,
+                'detention_charges_subtotal' => $detention,
+                'total_amount'               => $billTotal,
+                'updated_by'                 => auth()->id(),
+            ]);
+
+            if ($bill->voucher_id && ($bv = Voucher::find($bill->voucher_id))) {
+                $bv->update(['amount' => $billTotal]);
+            }
+
+            $message = "Bill {$bill->bill_no} recalculated.";
+
+            // 3) The invoice this bill is on.
+            if ($bill->invoice_id) {
+                $invoice = Invoice::whereKey($bill->invoice_id)->lockForUpdate()->first();
+                if ($invoice) {
+                    $bills = Bill::with(['jobs.vehicles', 'jobs.ptyVehicles'])->where('invoice_id', $invoice->id)->get();
+
+                    $isTaxable   = (bool) $invoice->is_taxable;
+                    $taxPct      = $isTaxable ? (float) $invoice->tax_percent : 0;
+                    $subtotal    = round($bills->sum('total_amount'), 2);
+                    $taxAmount   = $isTaxable ? round($subtotal * $taxPct / 100, 2) : 0;
+                    $sharePct    = $isTaxable ? (float) ($invoice->customer_tax_share_percent ?? 20) : null;
+                    $customerTax = $isTaxable ? round($taxAmount * $sharePct / 100, 2) : 0;
+                    $companyTax  = $isTaxable ? round($taxAmount - $customerTax, 2) : 0;
+                    $invTotal    = round($subtotal + $taxAmount, 2); // 100% of the tax, as on create/edit
+
+                    $paid   = (float) $invoice->paid_amount;
+                    $status = $paid <= 0 ? 'pending' : ($paid >= $invTotal ? 'cleared' : 'partial');
+
+                    $invoice->update([
+                        'trip_plan_subtotal'  => round($bills->sum('trip_plan_subtotal'), 2),
+                        'tax_amount'          => $taxAmount,
+                        'customer_tax_amount' => $customerTax,
+                        'company_tax_amount'  => $companyTax,
+                        'total_containers'    => (int) $bills->sum(fn ($b) => $b->container_count),
+                        'total_amount'        => $invTotal,
+                        'status'              => $status,
+                        'updated_by'          => auth()->id(),
+                    ]);
+
+                    // Ledger holds only the customer's share of the tax.
+                    if ($invoice->voucher_id && ($iv = Voucher::find($invoice->voucher_id))) {
+                        if ($customerTax > 0) {
+                            $iv->update(['amount' => $customerTax]);
+                        } else {
+                            $iv->delete();
+                            $invoice->update(['voucher_id' => null]);
+                        }
+                    }
+
+                    $message = "Bill {$bill->bill_no} and Invoice {$invoice->invoice_no} recalculated.";
+                }
+            }
+
+            return $message;
+        });
+    }`
     public function show($id)
     {
         $job = DailyJob::with([

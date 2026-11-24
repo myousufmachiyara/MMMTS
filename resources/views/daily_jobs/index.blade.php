@@ -157,11 +157,9 @@
                   </td>
                   <td class="actions">
                     @can('daily_jobs.edit')
-                      @if(!$row->bill_id)
-                        <a class="text-primary me-1" href="{{ route('daily-jobs.edit', $row->id) }}" title="Edit">
-                            <i class="fas fa-edit"></i>
-                        </a>
-                      @endif
+                      <a class="text-primary me-1" href="{{ route('daily-jobs.edit', $row->id) }}" title="Edit{{ $row->bill_id ? ' (billed — bill/invoice will be recalculated)' : '' }}">
+                          <i class="fas fa-edit"></i>
+                      </a>
                     @endcan
                     @can('daily_jobs.print')
                       <a class="text-success me-1" href="{{ route('daily-jobs.print', $row->id) }}" target="_blank" title="Print Job">
