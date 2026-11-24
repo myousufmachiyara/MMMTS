@@ -23,7 +23,8 @@
 <h2 class="mb-3">Edit Daily Job — {{ $job->job_no }}</h2>
 @if($job->bill_id)
     <div class="alert alert-warning">
-        This job is already on a bill@if($job->bill) (<strong>{{ $job->bill->bill_no }}</strong>)
+        This job is already on a bill
+        @if($job->bill) (<strong>{{ $job->bill->bill_no }}</strong>)@endif.
         Saving changes will recalculate that bill, its ledger vouchers, and its invoice if it has one.
     </div>
 @endif
